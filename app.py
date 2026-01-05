@@ -48,20 +48,14 @@ except Exception:  # pragma: no cover
 
 st.set_page_config(page_title="CACHE", page_icon="€", layout="centered")
 
-# Minimal chrome: hide Streamlit header/footer + tighten top padding.
+# Minimal styling: layout adjustments + red "Back" button only.
+# All other theming (including charts) follows system preference via Streamlit's native handling.
 st.markdown(
     """
 <style>
-  html, body, [data-testid="stAppViewContainer"] {
-    background-color: #0e1117;
-    color: #f0f2f6;
-  }
   .block-container {
     padding-top: 4.2rem;
     padding-bottom: 2.5rem;
-  }
-  [data-testid="stHeader"] {
-    background-color: #0e1117;
   }
   div.stButton > button {
     width: 100%;
@@ -74,9 +68,9 @@ st.markdown(
   }
   button[kind="secondary"],
   button[data-testid="baseButton-secondary"] {
-    background-color: #ef4444;
-    color: #ffffff;
-    border: 1px solid #b91c1c;
+    background-color: #ef4444 !important;
+    color: #ffffff !important;
+    border: 1px solid #b91c1c !important;
     min-width: 100%;
     height: 3.1rem;
     font-size: 1.05rem;
@@ -89,8 +83,8 @@ st.markdown(
   }
   button[kind="secondary"]:hover,
   button[data-testid="baseButton-secondary"]:hover {
-    background-color: #dc2626;
-    border-color: #991b1b;
+    background-color: #dc2626 !important;
+    border-color: #991b1b !important;
   }
 </style>
 """,
