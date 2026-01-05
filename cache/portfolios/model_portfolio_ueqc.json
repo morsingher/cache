@@ -1,0 +1,36 @@
+{
+    "Name": "Model Portfolio UEQC",
+    "Assets": [
+        {
+            "Name": "Stocks",
+            "Ticker": "ACWE.MI",
+            "Weight": 66.14,
+            "Target": 65.0
+        },
+        {
+            "Name": "Bonds",
+            "Ticker": "AGGH.MI",
+            "Weight": 19.87,
+            "Target": 20.0
+        },
+        {
+            "Name": "Gold",
+            "Ticker": "SGLD.MI",
+            "Weight": 4.42,
+            "Target": 5.0
+        },
+        {
+            "Name": "Bitcoin",
+            "Ticker": "BTC-EUR",
+            "Weight": 4.57,
+            "Target": 5.0
+        },
+        {
+            "Name": "Carry",
+            "Ticker": "UEQC.DE",
+            "Weight": 5.0,
+            "Target": 5.0
+        }
+    ],
+    "Value": 85000.00
+}

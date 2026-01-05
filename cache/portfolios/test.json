@@ -1,0 +1,17 @@
+{
+  "Name": "Test",
+  "Assets": [
+    {
+      "Name": "Stocks",
+      "Ticker": "ACWE.MI",
+      "Weight": 60.0,
+      "Target": 60.0
+    },
+    {
+      "Name": "Bonds",
+      "Ticker": "AGGH.MI",
+      "Weight": 40.0,
+      "Target": 40.0
+    }
+  ]
+}

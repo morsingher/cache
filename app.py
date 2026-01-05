@@ -1,0 +1,1825 @@
+import contextlib
+import io
+import json
+import os
+import sys
+import tempfile
+from types import SimpleNamespace
+from typing import Any
+
+import altair as alt
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+import streamlit as st
+
+
+# --- Import backend exactly like the CLI does (modules live in ./cache) ---
+REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
+CACHE_DIR = os.path.join(REPO_ROOT, "cache")
+if CACHE_DIR not in sys.path:
+    sys.path.insert(0, CACHE_DIR)
+
+from portfolio import Portfolio  # noqa: E402
+from comparison import run_comparison  # noqa: E402
+from rebalancing import compute_rebalancing_diagnostics, get_macro_snapshot, build_llm_rebalance_report  # noqa: E402
+from whatif import (  # noqa: E402
+    _apply_swap_from_stocks,
+    _parse_tickers,
+    _stocks_tickers,
+    _target_weights_fraction,
+    build_llm_whatif_report,
+    diversification_scores,
+    run_whatif,
+)
+from openrouter import (  # noqa: E402
+    fetch_free_models,
+    fetch_limits,
+    chat_completion,
+    get_api_key,
+    DEFAULT_FREE_MODELS,
+)
+
+try:
+    from fredapi import Fred  # type: ignore
+except Exception:  # pragma: no cover
+    Fred = None
+
+
+st.set_page_config(page_title="CACHE", page_icon="€", layout="centered")
+
+# Minimal chrome: hide Streamlit header/footer + tighten top padding.
+st.markdown(
+    """
+<style>
+  html, body, [data-testid="stAppViewContainer"] {
+    background-color: #0e1117;
+    color: #f0f2f6;
+  }
+  .block-container {
+    padding-top: 4.2rem;
+    padding-bottom: 2.5rem;
+  }
+  [data-testid="stHeader"] {
+    background-color: #0e1117;
+  }
+  div.stButton > button {
+    width: 100%;
+    height: 3.1rem;
+    font-size: 1.05rem;
+    border-radius: 0.8rem;
+    display: flex;
+    justify-content: center;
+    text-align: center;
+  }
+  button[kind="secondary"],
+  button[data-testid="baseButton-secondary"] {
+    background-color: #ef4444;
+    color: #ffffff;
+    border: 1px solid #b91c1c;
+    min-width: 100%;
+    height: 3.1rem;
+    font-size: 1.05rem;
+    font-weight: 600;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.45rem;
+    white-space: nowrap;
+  }
+  button[kind="secondary"]:hover,
+  button[data-testid="baseButton-secondary"]:hover {
+    background-color: #dc2626;
+    border-color: #991b1b;
+  }
+</style>
+""",
+    unsafe_allow_html=True,
+)
+
+def _rf_annual_controls(*, key_prefix: str, default_series: str = "ECBDFR") -> float:
+    mode = st.radio(
+        "Risk-free rate",
+        options=["Manual", "FRED"],
+        index=0,
+        horizontal=True,
+        key=f"{key_prefix}_rf_mode",
+        help="Used for Sharpe/Sortino in analysis + comparisons/backtests.",
+    )
+
+    if mode == "Manual":
+        rf = st.number_input(
+            "rf (annual, decimal)",
+            min_value=0.0,
+            max_value=1.0,
+            value=0.0,
+            step=0.005,
+            key=f"{key_prefix}_rf_manual",
+        )
+        return float(rf)
+
+    series_id = st.text_input("FRED series id", value=default_series, key=f"{key_prefix}_rf_series")
+    if Fred is None:
+        st.warning("fredapi not available; using 0%.")
+        return 0.0
+
+    api_key = os.environ.get("FRED_API_KEY", "").strip()
+    if not api_key:
+        st.error("Set the `FRED_API_KEY` environment variable to use FRED data.")
+        return 0.0
+
+    try:
+        fred = Fred(api_key=api_key)
+        s = fred.get_series(series_id).dropna()
+        if s is None or len(s) == 0:
+            st.warning("FRED series returned no data; using 0%.")
+            return 0.0
+        latest_pct = float(s.iloc[-1])
+        st.caption(f"Latest: {latest_pct:.3f}%")
+        return float(latest_pct / 100.0)
+    except Exception as e:
+        st.warning(f"FRED fetch failed; using 0%. ({e})")
+        return 0.0
+
+
+def _backtest_controls(*, key_prefix: str, show_initial_amount: bool = True) -> tuple[str, float, float]:
+    """
+    Returns: (rebalance_frequency, initial_amount, rf_annual)
+    """
+    c1, c2 = st.columns([1, 1])
+    with c1:
+        rebalance_display = st.radio(
+            "Rebalance frequency",
+            options=["Monthly", "Quarterly", "Annually"],
+            index=2,
+            horizontal=True,
+            key=f"{key_prefix}_reb_freq",
+        )
+        rebalance_frequency = str(rebalance_display).lower()
+    with c2:
+        initial_amount = 10_000.0
+        if show_initial_amount:
+            initial_amount = st.number_input(
+                "Initial amount (EUR)",
+                min_value=100.0,
+                value=10_000.0,
+                step=500.0,
+                key=f"{key_prefix}_initial_amt",
+            )
+
+    rf_annual = _rf_annual_controls(key_prefix=key_prefix)
+
+    return str(rebalance_frequency), float(initial_amount), float(rf_annual)
+
+
+def _safe_temp_json(content: bytes) -> str:
+    f = tempfile.NamedTemporaryFile(mode="wb", suffix=".json", delete=False)
+    f.write(content)
+    f.flush()
+    f.close()
+    return f.name
+
+
+def _portfolio_json_from_manual(
+    *,
+    portfolio_name: str,
+    df: pd.DataFrame,
+    value_eur: float | None,
+) -> dict[str, Any]:
+    assets: list[dict[str, Any]] = []
+    for _, row in df.iterrows():
+        assets.append(
+            {
+                "Name": str(row["Asset Name"]).strip(),
+                "Ticker": str(row["Ticker"]).strip(),
+                "Weight": float(row["Weight (%)"]),
+                "Target": float(row["Target (%)"]),
+            }
+        )
+    obj: dict[str, Any] = {"Name": str(portfolio_name).strip() or "Portfolio", "Assets": assets}
+    if value_eur is not None:
+        obj["Value"] = float(value_eur)
+    return obj
+
+
+def _build_portfolio_from_manual(
+    *,
+    portfolio_name: str,
+    df: pd.DataFrame,
+    value_eur: float | None,
+    normalize: bool,
+) -> Portfolio:
+    data = df.copy()
+    data = data.replace({np.nan: None})
+
+    # basic cleanup
+    data["Asset Name"] = data["Asset Name"].astype(str).str.strip()
+    data["Ticker"] = data["Ticker"].astype(str).str.strip()
+    data["Weight (%)"] = pd.to_numeric(data["Weight (%)"], errors="coerce")
+    data["Target (%)"] = pd.to_numeric(data["Target (%)"], errors="coerce")
+    data = data.dropna(subset=["Ticker", "Weight (%)", "Target (%)"], how="any")
+    data = data[data["Ticker"].astype(str).str.len() > 0]
+    if data.empty:
+        raise ValueError("No valid rows. Provide at least one asset with Ticker/Weight/Target.")
+
+    # enforce unique tickers
+    tickers = data["Ticker"].tolist()
+    if len(set(tickers)) != len(tickers):
+        dupes = sorted({t for t in tickers if tickers.count(t) > 1})
+        raise ValueError(f"Duplicate tickers not allowed: {dupes}")
+
+    w_sum = float(np.nansum(data["Weight (%)"].to_numpy(dtype=float)))
+    t_sum = float(np.nansum(data["Target (%)"].to_numpy(dtype=float)))
+    if normalize:
+        if w_sum <= 0 or t_sum <= 0:
+            raise ValueError("Cannot normalize: weight sums must be > 0.")
+        data["Weight (%)"] = data["Weight (%)"] * (100.0 / w_sum)
+        data["Target (%)"] = data["Target (%)"] * (100.0 / t_sum)
+        w_sum, t_sum = 100.0, 100.0
+
+    tol = 0.25
+    if abs(w_sum - 100.0) > tol:
+        raise ValueError(f"Current weights must sum to 100 (±{tol}). Got {w_sum:.4f}.")
+    if abs(t_sum - 100.0) > tol:
+        raise ValueError(f"Target weights must sum to 100 (±{tol}). Got {t_sum:.4f}.")
+
+    assets = data["Asset Name"].tolist()
+    weights = data["Weight (%)"].to_list()
+    targets = data["Target (%)"].to_list()
+
+    p = Portfolio(tickers=tickers, weights=weights, assets=assets)
+    p.name = str(portfolio_name).strip() or "Portfolio"
+    p.current_value_eur = float(value_eur) if value_eur is not None else None
+    p.actual_weights_pct = {t: float(w) for t, w in zip(tickers, weights)}
+    p.target_weights_pct = {t: float(w) for t, w in zip(tickers, targets)}
+    return p
+
+
+def portfolio_builder(
+    *,
+    key: str,
+    title: str = "Portfolio",
+    allow_value: bool = False,
+) -> tuple[Portfolio | None, dict[str, Any] | None]:
+    """
+    Returns:
+      - portfolio instance (or None if not ready)
+      - portfolio json (dict) if built manually (else None)
+    """
+    if title:
+        st.subheader(title)
+
+    source = st.radio(
+        "Create / load portfolio",
+        options=["Built-in JSON", "Upload JSON", "Manual"],
+        horizontal=True,
+        key=f"{key}_source",
+    )
+
+    built_json_obj: dict[str, Any] | None = None
+
+    if source == "Built-in JSON":
+        portfolios_dir = os.path.join(CACHE_DIR, "portfolios")
+        paths = []
+        try:
+            for fname in sorted(os.listdir(portfolios_dir)):
+                if fname.lower().endswith(".json"):
+                    paths.append(os.path.join(portfolios_dir, fname))
+        except Exception:
+            paths = []
+
+        if not paths:
+            st.error("No built-in portfolios found in `cache/portfolios/`.")
+            return None, None
+
+        path = st.selectbox("Select a portfolio JSON", options=paths, format_func=lambda p: os.path.basename(p), key=f"{key}_builtin")
+        try:
+            return Portfolio.from_json(path), None
+        except Exception as e:
+            st.error(str(e))
+            return None, None
+
+    if source == "Upload JSON":
+        up = st.file_uploader("Upload a portfolio JSON", type=["json"], key=f"{key}_upload")
+        if up is None:
+            return None, None
+        try:
+            tmp = _safe_temp_json(up.getvalue())
+            return Portfolio.from_json(tmp), None
+        except Exception as e:
+            st.error(str(e))
+            return None, None
+
+    # Manual
+    col1, col2 = st.columns([2, 1])
+    with col1:
+        portfolio_name = st.text_input("Portfolio name", value="My Portfolio", key=f"{key}_name")
+    with col2:
+        value_eur = None
+        if allow_value:
+            value_eur = st.number_input("Current value (EUR)", min_value=0.0, value=80_000.0, step=1_000.0, key=f"{key}_value")
+
+    st.caption("Tip: for what-if, at least one row’s **Asset Name** should be exactly `Stocks` (case-insensitive).")
+
+    default = pd.DataFrame(
+        [
+            {"Asset Name": "Stocks", "Ticker": "ACWE.MI", "Weight (%)": 60.0, "Target (%)": 60.0},
+            {"Asset Name": "Bonds", "Ticker": "AGGH.MI", "Weight (%)": 40.0, "Target (%)": 40.0},
+        ]
+    )
+    df = st.data_editor(
+        default,
+        num_rows="dynamic",
+        use_container_width=True,
+        key=f"{key}_editor",
+        column_config={
+            "Asset Name": st.column_config.TextColumn(required=True),
+            "Ticker": st.column_config.TextColumn(required=True),
+            "Weight (%)": st.column_config.NumberColumn(required=True, min_value=0.0),
+            "Target (%)": st.column_config.NumberColumn(required=True, min_value=0.0),
+        },
+    )
+
+    normalize = st.checkbox("Auto-normalize Weight/Target columns to sum to 100", value=True, key=f"{key}_normalize")
+
+    # Show sums
+    try:
+        w_sum = float(pd.to_numeric(df["Weight (%)"], errors="coerce").sum())
+        t_sum = float(pd.to_numeric(df["Target (%)"], errors="coerce").sum())
+        st.caption(f"Current weights sum: {w_sum:.3f} | Target weights sum: {t_sum:.3f}")
+    except Exception:
+        pass
+
+    try:
+        built_json_obj = _portfolio_json_from_manual(portfolio_name=portfolio_name, df=df, value_eur=value_eur if allow_value else None)
+        p = _build_portfolio_from_manual(
+            portfolio_name=portfolio_name,
+            df=df,
+            value_eur=value_eur if allow_value else None,
+            normalize=bool(normalize),
+        )
+    except Exception as e:
+        st.error(str(e))
+        return None, built_json_obj
+
+    c1, c2 = st.columns([1, 2])
+    with c1:
+        st.download_button(
+            "Download JSON",
+            data=json.dumps(built_json_obj, indent=2).encode("utf-8"),
+            file_name=f"{(portfolio_name or 'portfolio').strip().replace(' ', '_')}.json",
+            mime="application/json",
+            key=f"{key}_download",
+        )
+    with c2:
+        with st.expander("Preview JSON"):
+            st.code(json.dumps(built_json_obj, indent=2), language="json")
+
+    return p, built_json_obj
+
+
+def _manual_portfolio_builder(
+    *,
+    key: str,
+    title: str = "Manual Portfolio",
+) -> Portfolio | None:
+    """
+    Simplified portfolio builder that only allows manual entry (no JSON options).
+    """
+    if title:
+        st.subheader(title)
+
+    col1, col2 = st.columns([2, 1])
+    with col1:
+        portfolio_name = st.text_input("Portfolio name", value="My Portfolio", key=f"{key}_name")
+    col2.empty()
+
+    default = pd.DataFrame(
+        [
+            {"Asset Name": "Stocks", "Ticker": "ACWE.MI", "Weight (%)": 60.0, "Target (%)": 60.0},
+            {"Asset Name": "Bonds", "Ticker": "AGGH.MI", "Weight (%)": 40.0, "Target (%)": 40.0},
+        ]
+    )
+    df = st.data_editor(
+        default,
+        num_rows="dynamic",
+        use_container_width=True,
+        key=f"{key}_editor",
+        column_config={
+            "Asset Name": st.column_config.TextColumn(required=True),
+            "Ticker": st.column_config.TextColumn(required=True),
+            "Weight (%)": st.column_config.NumberColumn(required=True, min_value=0.0),
+            "Target (%)": st.column_config.NumberColumn(required=True, min_value=0.0),
+        },
+    )
+
+    normalize = st.checkbox("Auto-normalize Weight/Target columns to sum to 100", value=True, key=f"{key}_normalize")
+
+    try:
+        w_sum = float(pd.to_numeric(df["Weight (%)"], errors="coerce").sum())
+        t_sum = float(pd.to_numeric(df["Target (%)"], errors="coerce").sum())
+        st.caption(f"Current weights sum: {w_sum:.3f} | Target weights sum: {t_sum:.3f}")
+    except Exception:
+        pass
+
+    try:
+        p = _build_portfolio_from_manual(
+            portfolio_name=portfolio_name,
+            df=df,
+            value_eur=None,
+            normalize=bool(normalize),
+        )
+        return p
+    except Exception as e:
+        st.error(str(e))
+        return None
+
+
+def _rolling_correlation_to_stocks(p: Portfolio, window_days: int = 252) -> pd.DataFrame:
+    """
+    Computes rolling correlations (window_days) of every non-stock asset versus the portfolio's stock sleeve.
+    """
+    prices = p._prices_df().dropna(how="all").sort_index()
+    if prices.empty:
+        return pd.DataFrame()
+
+    returns = prices.pct_change().dropna(how="all")
+    assets_map: dict[str, str] = getattr(p, "assets", {})
+    tickers: list[str] = list(getattr(p, "tickers", []))
+    stock_tickers = [t for t in tickers if assets_map.get(t, "").strip().lower() == "stocks"]
+    if not stock_tickers:
+        return pd.DataFrame()
+
+    stock_returns = returns[stock_tickers].mean(axis=1).dropna()
+    if stock_returns.empty:
+        return pd.DataFrame()
+
+    min_periods = min(window_days, 126)
+    corr_series: list[pd.Series] = []
+    for ticker in p.tickers:
+        if ticker in stock_tickers or ticker not in returns.columns:
+            continue
+        series = returns[ticker].dropna()
+        if series.empty:
+            continue
+        pair = pd.concat([stock_returns, series], axis=1).dropna(how="any")
+        if pair.empty:
+            continue
+        corr = pair.iloc[:, 0].rolling(window=window_days, min_periods=min_periods).corr(pair.iloc[:, 1])
+        corr_series.append(corr.rename(p._label(ticker)))
+
+    if not corr_series:
+        return pd.DataFrame()
+    return pd.concat(corr_series, axis=1).dropna(how="all")
+
+
+def _compare_portfolios_streamlit(
+    portfolios: list[tuple[str, Portfolio]],
+    *,
+    rf_annual: float,
+    rebalance_frequency: str,
+    initial_amount: float,
+) -> tuple[pd.DataFrame, dict[str, pd.Series]]:
+    if len(portfolios) < 2:
+        raise ValueError("Need at least 2 portfolios to compare.")
+
+    # Align each portfolio internally first
+    for _, p in portfolios:
+        p.adjust_dates(debug=False)
+
+    # Common overlapping index across portfolios
+    common_index = None
+    for _, p in portfolios:
+        px = p._prices_df().dropna(how="any").sort_index()
+        idx = px.index
+        common_index = idx if common_index is None else common_index.intersection(idx)
+    if common_index is None or len(common_index) < 3:
+        raise ValueError("Portfolios do not have enough overlapping price history to compare.")
+    common_index = common_index.sort_values()
+
+    rows: list[dict[str, object]] = []
+    value_series: dict[str, pd.Series] = {}
+
+    for name, p in portfolios:
+        if not hasattr(p, "target_weights_pct"):
+            raise ValueError(f"Portfolio '{name}' is missing per-asset target weights.")
+
+        wt_pct = [float(p.target_weights_pct[t]) for t in p.tickers]
+        wt = Portfolio._normalize_weights_to_fraction(wt_pct)
+        weights = {t: float(w) for t, w in zip(p.tickers, wt)}
+
+        prices_df = p._prices_df().reindex(common_index).dropna(how="any")
+        v = Portfolio.backtest_value_series(
+            prices_df,
+            weights,
+            rebalance_frequency=str(rebalance_frequency),
+            initial_value=float(initial_amount),
+        )
+        v = v.reindex(common_index).dropna()
+        value_series[name] = v
+
+        stats = Portfolio.backtest_stats(v, rf_annual=float(rf_annual))
+        rows.append(
+            {
+                "Portfolio": name,
+                "Total Return": float(stats.get("total_return", float("nan"))),
+                "CAGR": float(stats.get("cagr", float("nan"))),
+                "Vol (ann.)": float(stats.get("vol_annual", float("nan"))),
+                "Sharpe": float(stats.get("sharpe", float("nan"))),
+                "Sortino": float(stats.get("sortino", float("nan"))),
+                "Max Drawdown": float(stats.get("max_drawdown", float("nan"))),
+                "Max Gain": float(stats.get("max_gain", float("nan"))),
+            }
+        )
+
+    df = pd.DataFrame(rows).set_index("Portfolio")
+    return df, value_series
+
+
+def _run_and_capture_stdout(fn, *args, **kwargs) -> str:
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        fn(*args, **kwargs)
+    return buf.getvalue()
+
+
+def _render_llm_query_ui(
+    *,
+    key_prefix: str,
+    llm_prompt: str,
+    title: str = "Ask an LLM",
+) -> None:
+    """
+    Render a reusable LLM query UI component.
+    
+    Includes:
+    - API key check
+    - Model selection (free models only)
+    - Usage/limits display
+    - Query button
+    - Response display
+    """
+    if title:
+        st.markdown(f"### {title}")
+    
+    # Check API key
+    api_key = get_api_key()
+    if not api_key:
+        st.error(
+            "**OPENROUTER_API_KEY** environment variable is not set. "
+            "Please set it to use LLM features."
+        )
+        return
+    
+    # Fetch and display limits
+    with st.expander("API Usage and Limits", expanded=False):
+        limits = fetch_limits(api_key)
+        if limits is not None:
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                if limits.credits_remaining is not None and limits.credit_limit is not None:
+                    st.metric(
+                        "Credits Remaining",
+                        f"${limits.credits_remaining:.4f}",
+                        delta=None,
+                    )
+                elif limits.credits_remaining is not None:
+                    st.metric("Credits Remaining", f"${limits.credits_remaining:.4f}")
+                else:
+                    st.metric("Credits Remaining", "Unlimited (free tier)")
+            with col2:
+                if limits.usage_daily is not None:
+                    st.metric("Daily Usage", f"${limits.usage_daily:.4f}")
+                else:
+                    st.metric("Daily Usage", "N/A")
+            with col3:
+                if limits.rate_limit_requests and limits.rate_limit_interval:
+                    st.metric(
+                        "Rate Limit",
+                        f"{limits.rate_limit_requests} req/{limits.rate_limit_interval}",
+                    )
+                else:
+                    st.metric("Rate Limit", "Default")
+            
+            st.caption(
+                "**Free tier limits:** 20 requests/minute, 200 requests/day. "
+                "Models with `:free` suffix have no token cost but may have usage limits."
+            )
+        else:
+            st.warning("Could not fetch usage limits.")
+            st.caption(
+                "**Typical free tier limits:** 20 requests/minute, 200 requests/day."
+            )
+    
+    # Model selection
+    # Use cached free models list to avoid repeated API calls
+    cache_key = f"{key_prefix}_free_models_cache"
+    if cache_key not in st.session_state:
+        with st.spinner("Loading available models..."):
+            st.session_state[cache_key] = fetch_free_models(api_key)
+    
+    free_models = st.session_state[cache_key]
+    
+    # Find default model index
+    default_model = "meta-llama/llama-3.3-70b-instruct:free"
+    default_idx = 0
+    if default_model in free_models:
+        default_idx = free_models.index(default_model)
+    
+    selected_model = st.selectbox(
+        "Select model (free tier only)",
+        options=free_models,
+        index=default_idx,
+        key=f"{key_prefix}_model_select",
+        help="All listed models are free to use. Some may have daily usage limits.",
+    )
+    
+    # Advanced settings
+    with st.expander("Advanced Settings", expanded=False):
+        max_tokens = st.slider(
+            "Max response tokens",
+            min_value=500,
+            max_value=8000,
+            value=4000,
+            step=500,
+            key=f"{key_prefix}_max_tokens",
+            help="Maximum number of tokens in the LLM response. Higher = longer responses.",
+        )
+        temperature = st.slider(
+            "Temperature",
+            min_value=0.0,
+            max_value=1.0,
+            value=0.7,
+            step=0.1,
+            key=f"{key_prefix}_temperature",
+            help="Higher = more creative, lower = more focused/deterministic.",
+        )
+    
+    # Query button
+    if st.button("Query LLM", type="primary", key=f"{key_prefix}_query_btn"):
+        with st.spinner(f"Querying {selected_model}..."):
+            response = chat_completion(
+                prompt=llm_prompt,
+                model=str(selected_model),
+                api_key=api_key,
+                max_tokens=int(max_tokens) if "max_tokens" in dir() else 4000,
+                temperature=float(temperature) if "temperature" in dir() else 0.7,
+            )
+            
+            # Store response in session state
+            st.session_state[f"{key_prefix}_llm_response"] = response
+    
+    # Display response if available
+    response_key = f"{key_prefix}_llm_response"
+    if response_key in st.session_state:
+        response = st.session_state[response_key]
+        
+        if response.error:
+            st.error(f"**Error:** {response.error}")
+        else:
+            st.markdown("#### LLM Response")
+            st.markdown(response.content)
+            
+            # Show token usage
+            if response.total_tokens:
+                st.caption(
+                    f"Tokens used: {response.prompt_tokens} prompt + "
+                    f"{response.completion_tokens} completion = {response.total_tokens} total"
+                )
+
+
+def _render_title() -> None:
+    st.markdown(
+        """
+<div style="text-align:center; margin: 0.9rem 0 1.0rem 0;">
+  <div style="font-size: 3.0rem; font-weight: 750; letter-spacing: 0.02em; line-height: 1.0;">
+    CACH€ 
+  </div>
+  <div style="font-size: 1.55rem; font-weight: 600; letter-spacing: 0.01em; line-height: 1.1; margin-top: 0.35rem;">
+    Your financial assistant.
+  </div>
+</div>
+""",
+        unsafe_allow_html=True,
+    )
+
+
+def _go(page: str) -> None:
+    st.session_state["page"] = page
+    st.rerun()
+
+
+if "page" not in st.session_state:
+    st.session_state["page"] = "home"
+
+_render_title()
+
+page = str(st.session_state.get("page", "home"))
+
+if page != "home":
+    c1, c2, c3 = st.columns([1.2, 8, 0.8])
+    with c1:
+        if st.button("← Back", type="secondary", key="nav_back", use_container_width=False):
+            _go("home")
+    st.markdown("")
+
+
+if page == "home":
+    st.markdown("")
+    st.markdown(
+        """
+<div style="text-align:center; font-size: 1.5rem; font-style: italic; font-weight: 600; letter-spacing: 0.01em; margin: 0 0 1.1rem 0;">
+  Hello Marco, what do you need today?
+</div>
+""",
+        unsafe_allow_html=True,
+    )
+    # Reserve space on both sides so the navigation buttons stay centered under the title.
+    left, mid, right = st.columns([2.2, 3.6, 2.2])
+    left.empty()
+    right.empty()
+    with mid:
+        if st.button("Analyze a portfolio", type="primary", key="nav_analyze", use_container_width=True):
+            _go("analyze")
+        if st.button("Compare portfolios", type="primary", key="nav_compare", use_container_width=True):
+            _go("compare")
+        if st.button("Rebalance with new cash", type="primary", key="nav_rebalance", use_container_width=True):
+            _go("rebalance")
+        if st.button("What-if: add an asset", type="primary", key="nav_whatif", use_container_width=True):
+            _go("whatif")
+
+
+elif page == "analyze":
+    st.markdown("### Settings")
+    rebalance_frequency, initial_amount, rf_annual = _backtest_controls(key_prefix="analyze")
+    p, _ = portfolio_builder(key="analyze", title="Portfolio", allow_value=False)
+    if p is not None:
+        # Get available date range from portfolio data
+        try:
+            prices_raw = p._prices_df().dropna(how="any").sort_index()
+            available_start = prices_raw.index.min().date() if not prices_raw.empty else None
+            available_end = prices_raw.index.max().date() if not prices_raw.empty else None
+        except Exception:
+            available_start, available_end = None, None
+
+        st.markdown("#### Analysis period")
+        if available_start and available_end:
+            st.caption(f"Available data range: **{available_start}** to **{available_end}**")
+            date_c1, date_c2 = st.columns(2)
+            with date_c1:
+                user_start = st.date_input(
+                    "Start date",
+                    value=available_start,
+                    min_value=available_start,
+                    max_value=available_end,
+                    key="analyze_start_date",
+                )
+            with date_c2:
+                user_end = st.date_input(
+                    "End date",
+                    value=available_end,
+                    min_value=available_start,
+                    max_value=available_end,
+                    key="analyze_end_date",
+                )
+        else:
+            st.warning("Could not determine available date range from portfolio data.")
+            user_start, user_end = None, None
+
+        y_scale = st.radio(
+            "Y-axis scale (for value charts)",
+            options=["Linear", "Logarithmic"],
+            index=0,
+            horizontal=True,
+            key="analyze_y_scale",
+        )
+
+        c1, c2 = st.columns([1, 1])
+        with c1:
+            run = st.button("Run analysis", type="primary", key="analyze_run")
+        with c2:
+            show_chart = st.checkbox("Show charts", value=True, key="analyze_charts")
+
+        # Run analysis and store in session state
+        if run:
+            with st.spinner("Running portfolio analysis..."):
+                try:
+                    p.adjust_dates(debug=False)
+                    prices_full = p._prices_df().dropna(how="any").sort_index()
+
+                    # Filter prices by user-selected date range BEFORE computing
+                    if user_start and user_end:
+                        prices_filtered = prices_full.loc[str(user_start):str(user_end)]
+                    else:
+                        prices_filtered = prices_full
+
+                    if prices_filtered.empty:
+                        raise ValueError("No data available in the selected date range.")
+
+                    start_date = prices_filtered.index.min().date()
+                    end_date = prices_filtered.index.max().date()
+
+                    # Get target weights
+                    target_weights_pct = getattr(p, "target_weights_pct", {})
+                    if not target_weights_pct:
+                        raise ValueError("Portfolio is missing target weights.")
+
+                    wt_pct = [float(target_weights_pct[t]) for t in p.tickers]
+                    wt = Portfolio._normalize_weights_to_fraction(wt_pct)
+                    weights = {t: float(w) for t, w in zip(p.tickers, wt)}
+
+                    # Compute value series on filtered date range
+                    value_series = Portfolio.backtest_value_series(
+                        prices_filtered,
+                        weights,
+                        rebalance_frequency=str(rebalance_frequency),
+                        initial_value=float(initial_amount),
+                    ).dropna()
+
+                    if value_series.empty:
+                        raise ValueError("Portfolio value series is empty for the selected parameters.")
+
+                    stats = Portfolio.backtest_stats(value_series, rf_annual=float(rf_annual))
+
+                    # Compute asset values on filtered range
+                    asset_values = float(initial_amount) * (prices_filtered / prices_filtered.iloc[0])
+                    asset_values = asset_values.rename(columns={t: p._label(t) for t in asset_values.columns})
+
+                    # Compute correlations
+                    assets_map = getattr(p, "assets", {})
+                    has_stock_label = any(str(name).strip().lower() == "stocks" for name in assets_map.values())
+                    corr_df = _rolling_correlation_to_stocks(p)
+                    if user_start and user_end and not corr_df.empty:
+                        corr_df = corr_df.loc[str(user_start):str(user_end)]
+
+                    # Build allocation data
+                    labels = [p._label(t) for t in target_weights_pct.keys()]
+                    sizes = [float(target_weights_pct[t]) for t in target_weights_pct.keys()]
+                    legend_labels = [f"{label} ({weight:.1f}%)" for label, weight in zip(labels, sizes)]
+                    alloc_df = pd.DataFrame({"Asset": labels, "Weight (%)": sizes, "Legend": legend_labels})
+
+                    # Store everything in session state
+                    st.session_state["analyze_results"] = {
+                        "start_date": start_date,
+                        "end_date": end_date,
+                        "value_series": value_series,
+                        "stats": stats,
+                        "asset_values": asset_values,
+                        "corr_df": corr_df,
+                        "has_stock_label": has_stock_label,
+                        "alloc_df": alloc_df,
+                    }
+
+                except Exception as e:
+                    st.error(str(e))
+                    st.session_state.pop("analyze_results", None)
+
+        # Display results from session state
+        if "analyze_results" in st.session_state:
+            results = st.session_state["analyze_results"]
+            st.markdown("### Results")
+            st.caption(f"Analysis period: {results['start_date']} → {results['end_date']}")
+
+            stats = results["stats"]
+            m1, m2, m3, m4, m5 = st.columns(5)
+            m1.metric("CAGR", f"{stats['cagr']*100:.2f}%" if np.isfinite(stats["cagr"]) else "—")
+            m2.metric("Vol (ann.)", f"{stats['vol_annual']*100:.2f}%" if np.isfinite(stats["vol_annual"]) else "—")
+            m3.metric("Sharpe", f"{stats['sharpe']:.2f}" if np.isfinite(stats["sharpe"]) else "—")
+            m4.metric("Sortino", f"{stats['sortino']:.2f}" if np.isfinite(stats["sortino"]) else "—")
+            max_dd = stats.get("max_drawdown", float("nan"))
+            max_dd_display = f"{max_dd*100:.2f}%" if np.isfinite(max_dd) else "—"
+            m5.metric("Max Drawdown", max_dd_display)
+
+            # Pie chart
+            alloc_df = results["alloc_df"]
+            st.markdown("#### Target allocation")
+            pie = (
+                alt.Chart(alloc_df)
+                .mark_arc(innerRadius=40, stroke="#0e1117", strokeWidth=1.4)
+                .encode(
+                    theta=alt.Theta("Weight (%):Q", title="Weight (%)"),
+                    color=alt.Color("Legend:N", title="Allocation"),
+                    tooltip=[
+                        alt.Tooltip("Asset:N", title="Asset"),
+                        alt.Tooltip("Weight (%):Q", title="Weight (%)", format=".1f"),
+                    ],
+                )
+                .properties(width=360, height=360)
+            )
+            pie_left, pie_center, pie_right = st.columns([1.2, 1, 1.2])
+            with pie_center:
+                st.altair_chart(pie, use_container_width=False)
+
+            if show_chart:
+                y_scale_type = "log" if y_scale == "Logarithmic" else "linear"
+                x_axis_format = alt.X("Date:T", title="Date", axis=alt.Axis(format="%m/%Y"))
+
+                # Portfolio value chart
+                value_series = results["value_series"]
+                value_df = value_series.to_frame(name="Value")
+                value_chart_df = value_df.reset_index().rename(columns={"index": "Date"})
+                st.markdown("#### Portfolio value over time")
+                chart_value = alt.Chart(value_chart_df).mark_line(color="#60a5fa", strokeWidth=2.4).encode(
+                    x=x_axis_format,
+                    y=alt.Y("Value:Q", title="Value (EUR)", scale=alt.Scale(type=y_scale_type)),
+                    tooltip=[
+                        alt.Tooltip("Date:T", title="Date"),
+                        alt.Tooltip("Value:Q", title="Value (EUR)", format=",.2f"),
+                    ],
+                ).properties(height=320).interactive()
+                st.altair_chart(chart_value, use_container_width=True)
+
+                # Asset value trajectories
+                asset_values = results["asset_values"]
+                if not asset_values.empty:
+                    st.markdown("#### Asset value trajectories")
+                    asset_labels = list(asset_values.columns)
+
+                    selected_assets = st.multiselect(
+                        "Select assets to display",
+                        options=asset_labels,
+                        default=asset_labels,
+                        key="analyze_asset_selection",
+                    )
+
+                    if selected_assets:
+                        asset_values_filtered = asset_values[selected_assets]
+                        asset_long = (
+                            asset_values_filtered.reset_index()
+                            .rename(columns={"index": "Date"})
+                            .melt(id_vars="Date", var_name="Asset", value_name="Value")
+                        )
+                        chart_assets = (
+                            alt.Chart(asset_long)
+                            .mark_line(strokeWidth=1.9)
+                            .encode(
+                                x=x_axis_format,
+                                y=alt.Y("Value:Q", title="Value (EUR)", scale=alt.Scale(type=y_scale_type)),
+                                color=alt.Color("Asset:N", title="Asset"),
+                                tooltip=[
+                                    alt.Tooltip("Date:T", title="Date"),
+                                    alt.Tooltip("Asset:N", title="Asset"),
+                                    alt.Tooltip("Value:Q", title="Value (EUR)", format=",.2f"),
+                                ],
+                            )
+                            .properties(height=320)
+                            .interactive()
+                        )
+                        st.altair_chart(chart_assets, use_container_width=True)
+                    else:
+                        st.info("Select at least one asset to display the chart.")
+                else:
+                    st.info("Asset price history unavailable; cannot render per-asset chart.")
+
+                # Correlation chart
+                corr_df = results["corr_df"]
+                has_stock_label = results["has_stock_label"]
+                if not has_stock_label:
+                    st.info("Label at least one asset as 'Stocks' to view rolling correlations.")
+                elif corr_df.empty:
+                    st.info("Not enough data to compute rolling correlations versus Stocks.")
+                else:
+                    st.markdown("#### Rolling 1Y correlation vs Stocks")
+                    corr_labels = list(corr_df.columns)
+
+                    selected_corr_assets = st.multiselect(
+                        "Select assets to display",
+                        options=corr_labels,
+                        default=corr_labels,
+                        key="analyze_corr_selection",
+                    )
+
+                    if selected_corr_assets:
+                        corr_df_filtered = corr_df[selected_corr_assets]
+                        corr_long = (
+                            corr_df_filtered.reset_index()
+                            .rename(columns={"index": "Date"})
+                            .melt(id_vars="Date", var_name="Asset", value_name="Correlation")
+                        )
+                        corr_chart = (
+                            alt.Chart(corr_long)
+                            .mark_line(strokeWidth=1.8)
+                            .encode(
+                                x=x_axis_format,
+                                y=alt.Y("Correlation:Q", title="Correlation", scale=alt.Scale(domain=[-1.05, 1.05])),
+                                color=alt.Color("Asset:N", title="Asset"),
+                                tooltip=[
+                                    alt.Tooltip("Date:T", title="Date"),
+                                    alt.Tooltip("Asset:N", title="Asset"),
+                                    alt.Tooltip("Correlation:Q", title="Correlation", format=".2f"),
+                                ],
+                            )
+                            .properties(height=320)
+                        )
+                        zero_line = alt.Chart(pd.DataFrame({"y": [0]})).mark_rule(color="#bbbbbb", strokeDash=[4, 4]).encode(
+                            y="y"
+                        )
+                        st.altair_chart((corr_chart + zero_line).interactive(), use_container_width=True)
+                    else:
+                        st.info("Select at least one asset to display the chart.")
+
+
+elif page == "compare":
+    st.markdown("### Settings")
+    rebalance_frequency, initial_amount, rf_annual = _backtest_controls(key_prefix="compare")
+
+    st.markdown("### Portfolios to compare")
+
+    portfolios_dir = os.path.join(CACHE_DIR, "portfolios")
+    builtin_paths = []
+    try:
+        for fname in sorted(os.listdir(portfolios_dir)):
+            if fname.lower().endswith(".json"):
+                builtin_paths.append(os.path.join(portfolios_dir, fname))
+    except Exception:
+        builtin_paths = []
+
+    selected_builtin = st.multiselect(
+        "Built-in portfolios",
+        options=builtin_paths,
+        format_func=lambda p: os.path.basename(p),
+        default=builtin_paths[:2] if len(builtin_paths) >= 2 else [],
+        key="compare_builtin",
+    )
+
+    uploaded = st.file_uploader("Upload additional portfolio JSONs", type=["json"], accept_multiple_files=True, key="compare_upload")
+    include_manual = st.checkbox("Include one manual portfolio", value=False, key="compare_include_manual")
+
+    manual_portfolio: Portfolio | None = None
+    if include_manual:
+        manual_portfolio = _manual_portfolio_builder(key="compare_manual", title="Manual portfolio")
+
+    # Collect all portfolios to determine available date range
+    all_portfolios: list[tuple[str, Portfolio]] = []
+    for path in selected_builtin:
+        try:
+            p_temp = Portfolio.from_json(path)
+            name = getattr(p_temp, "name", None) or os.path.basename(path)
+            all_portfolios.append((str(name), p_temp))
+        except Exception:
+            pass
+    if uploaded:
+        for up in uploaded:
+            try:
+                tmp = _safe_temp_json(up.getvalue())
+                p_temp = Portfolio.from_json(tmp)
+                name = getattr(p_temp, "name", None) or up.name
+                all_portfolios.append((str(name), p_temp))
+            except Exception:
+                pass
+    if manual_portfolio is not None:
+        all_portfolios.append((getattr(manual_portfolio, "name", "Manual"), manual_portfolio))
+
+    # Determine common date range across all selected portfolios
+    available_start, available_end = None, None
+    if len(all_portfolios) >= 2:
+        try:
+            common_index = None
+            for _, p_temp in all_portfolios:
+                p_temp.adjust_dates(debug=False)
+                px = p_temp._prices_df().dropna(how="any").sort_index()
+                idx = px.index
+                common_index = idx if common_index is None else common_index.intersection(idx)
+            if common_index is not None and len(common_index) >= 3:
+                common_index = common_index.sort_values()
+                available_start = common_index.min().date()
+                available_end = common_index.max().date()
+        except Exception:
+            pass
+
+    st.markdown("#### Analysis period")
+    if available_start and available_end:
+        st.caption(f"Common data range: **{available_start}** to **{available_end}**")
+        date_c1, date_c2 = st.columns(2)
+        with date_c1:
+            user_start = st.date_input(
+                "Start date",
+                value=available_start,
+                min_value=available_start,
+                max_value=available_end,
+                key="compare_start_date",
+            )
+        with date_c2:
+            user_end = st.date_input(
+                "End date",
+                value=available_end,
+                min_value=available_start,
+                max_value=available_end,
+                key="compare_end_date",
+            )
+    else:
+        if len(all_portfolios) < 2:
+            st.info("Select at least 2 portfolios to see the available date range.")
+        else:
+            st.warning("Could not determine common date range from selected portfolios.")
+        user_start, user_end = None, None
+
+    y_scale = st.radio(
+        "Y-axis scale",
+        options=["Linear", "Logarithmic"],
+        index=0,
+        horizontal=True,
+        key="compare_y_scale",
+    )
+
+    run = st.button("Run comparison", type="primary", key="compare_run")
+    if run:
+        with st.spinner("Comparing portfolios..."):
+            try:
+                if len(all_portfolios) < 2:
+                    raise ValueError("Select/upload at least two portfolios.")
+
+                # Align each portfolio internally first
+                for _, p in all_portfolios:
+                    p.adjust_dates(debug=False)
+
+                # Common overlapping index across portfolios
+                common_index = None
+                for _, p in all_portfolios:
+                    px = p._prices_df().dropna(how="any").sort_index()
+                    idx = px.index
+                    common_index = idx if common_index is None else common_index.intersection(idx)
+                if common_index is None or len(common_index) < 3:
+                    raise ValueError("Portfolios do not have enough overlapping price history to compare.")
+                common_index = common_index.sort_values()
+
+                # Apply user-selected date range
+                if user_start and user_end:
+                    common_index = common_index[(common_index >= str(user_start)) & (common_index <= str(user_end))]
+                    if len(common_index) < 3:
+                        raise ValueError("Not enough data in the selected date range.")
+
+                start_date = common_index.min().date()
+                end_date = common_index.max().date()
+
+                rows: list[dict[str, object]] = []
+                value_series: dict[str, pd.Series] = {}
+
+                for name, p in all_portfolios:
+                    if not hasattr(p, "target_weights_pct"):
+                        raise ValueError(f"Portfolio '{name}' is missing per-asset target weights.")
+
+                    wt_pct = [float(p.target_weights_pct[t]) for t in p.tickers]
+                    wt = Portfolio._normalize_weights_to_fraction(wt_pct)
+                    weights = {t: float(w) for t, w in zip(p.tickers, wt)}
+
+                    prices_df = p._prices_df().reindex(common_index).dropna(how="any")
+                    v = Portfolio.backtest_value_series(
+                        prices_df,
+                        weights,
+                        rebalance_frequency=str(rebalance_frequency),
+                        initial_value=float(initial_amount),
+                    )
+                    v = v.reindex(common_index).dropna()
+                    value_series[name] = v
+
+                    stats = Portfolio.backtest_stats(v, rf_annual=float(rf_annual))
+                    rows.append(
+                        {
+                            "Portfolio": name,
+                            "Total Return": float(stats.get("total_return", float("nan"))),
+                            "CAGR": float(stats.get("cagr", float("nan"))),
+                            "Vol (ann.)": float(stats.get("vol_annual", float("nan"))),
+                            "Sharpe": float(stats.get("sharpe", float("nan"))),
+                            "Sortino": float(stats.get("sortino", float("nan"))),
+                            "Max Drawdown": float(stats.get("max_drawdown", float("nan"))),
+                            "Max Gain": float(stats.get("max_gain", float("nan"))),
+                        }
+                    )
+
+                df = pd.DataFrame(rows).set_index("Portfolio")
+
+                # Build allocation overview table
+                st.markdown("### Allocation overview")
+                all_asset_names: set[str] = set()
+                portfolio_allocations: dict[str, dict[str, float]] = {}
+                for name, p in all_portfolios:
+                    assets_map = getattr(p, "assets", {})
+                    target_weights = getattr(p, "target_weights_pct", {})
+                    alloc: dict[str, float] = {}
+                    for ticker in p.tickers:
+                        asset_name = assets_map.get(ticker, ticker)
+                        weight = float(target_weights.get(ticker, 0.0))
+                        # If same asset name appears multiple times, sum the weights
+                        alloc[asset_name] = alloc.get(asset_name, 0.0) + weight
+                        all_asset_names.add(asset_name)
+                    portfolio_allocations[name] = alloc
+
+                # Build allocation DataFrame
+                sorted_asset_names = sorted(all_asset_names)
+                alloc_rows = []
+                for name, alloc in portfolio_allocations.items():
+                    row = {"Portfolio": name}
+                    for asset_name in sorted_asset_names:
+                        weight = alloc.get(asset_name, 0.0)
+                        row[asset_name] = f"{weight:.1f}%"
+                    alloc_rows.append(row)
+                alloc_df = pd.DataFrame(alloc_rows).set_index("Portfolio")
+                st.dataframe(alloc_df, use_container_width=True)
+
+                st.markdown("### Results")
+                st.caption(f"Comparison period: {start_date} → {end_date}")
+
+                # Format and display statistics table with % symbols
+                pretty = df.copy()
+                pct_cols = ["Total Return", "CAGR", "Vol (ann.)", "Max Drawdown", "Max Gain"]
+                for c in pct_cols:
+                    pretty[c] = (pretty[c].astype(float) * 100.0).round(2).astype(str) + "%"
+                pretty[["Sharpe", "Sortino"]] = pretty[["Sharpe", "Sortino"]].astype(float).round(2)
+                st.dataframe(pretty, use_container_width=True)
+
+                # Build Altair chart
+                st.markdown("#### Portfolio value over time")
+                chart_data = []
+                for name, v in value_series.items():
+                    for date, value in v.items():
+                        chart_data.append({"Date": date, "Portfolio": name, "Value": float(value)})
+                chart_df = pd.DataFrame(chart_data)
+
+                y_scale_type = "log" if y_scale == "Logarithmic" else "linear"
+                x_axis_format = alt.X("Date:T", title="Date", axis=alt.Axis(format="%m/%Y"))
+
+                chart = (
+                    alt.Chart(chart_df)
+                    .mark_line(strokeWidth=2.0)
+                    .encode(
+                        x=x_axis_format,
+                        y=alt.Y("Value:Q", title="Value (EUR)", scale=alt.Scale(type=y_scale_type)),
+                        color=alt.Color("Portfolio:N", title="Portfolio"),
+                        tooltip=[
+                            alt.Tooltip("Date:T", title="Date"),
+                            alt.Tooltip("Portfolio:N", title="Portfolio"),
+                            alt.Tooltip("Value:Q", title="Value (EUR)", format=",.2f"),
+                        ],
+                    )
+                    .properties(height=400)
+                    .interactive()
+                )
+                st.altair_chart(chart, use_container_width=True)
+
+            except Exception as e:
+                st.error(str(e))
+
+
+elif page == "rebalance":
+    p, _ = portfolio_builder(key="rebalance", title="Portfolio", allow_value=True)
+    if p is not None:
+        st.markdown("### Settings")
+        new_cash = st.number_input("New cash to allocate (EUR)", min_value=0.0, value=2_000.0, step=100.0, key="rebalance_cash")
+
+        # Get FRED API key from environment
+        fred_api_key = os.environ.get("FRED_API_KEY", "").strip()
+        if not fred_api_key:
+            st.error("FRED_API_KEY environment variable is not set. Please set it to enable macro-economic data.")
+
+        run = st.button("Compute rebalance", type="primary", key="rebalance_run")
+        if run:
+            with st.spinner("Computing rebalance and fetching macro data..."):
+                try:
+                    if not fred_api_key:
+                        raise ValueError("FRED_API_KEY environment variable is required.")
+
+                    table = p.rebalance(float(new_cash))
+                    table_transposed = table.T
+                    table_transposed.columns = [p._label(t) if hasattr(p, "_label") else t for t in table_transposed.columns]
+
+                    diag = None
+                    diag_transposed = None
+                    diag_error = None
+                    try:
+                        diag = compute_rebalancing_diagnostics(p)
+                        diag_transposed = diag.T
+                        diag_transposed.columns = [p._label(t) if hasattr(p, "_label") else t for t in diag_transposed.columns]
+                    except Exception as e:
+                        diag_error = str(e)
+
+                    snap = get_macro_snapshot(fred_api_key=fred_api_key, debug=False)
+                    
+                    # Fetch macro chart data
+                    macro_chart_data = []
+                    if snap is not None and Fred is not None:
+                        try:
+                            fred = Fred(api_key=fred_api_key)
+                            one_year_ago = pd.Timestamp.now() - pd.DateOffset(years=1)
+                            macro_series = {
+                                "ECB Deposit Rate (%)": "ECBDFR",
+                                "US 10Y TIPS Yield (%)": "DFII10",
+                                "DE 10Y Yield (%)": "IRLTLT01DEM156N",
+                            }
+                            for label, series_id in macro_series.items():
+                                try:
+                                    s = fred.get_series(series_id, observation_start=one_year_ago)
+                                    if s is not None and len(s) > 0:
+                                        s = s.dropna()
+                                        for date, value in s.items():
+                                            macro_chart_data.append({"Date": date, "Indicator": label, "Value": float(value)})
+                                except Exception:
+                                    pass
+                        except Exception:
+                            pass
+
+                    # Generate LLM prompt
+                    llm_prompt = None
+                    current_value = getattr(p, "current_value_eur", None)
+                    if current_value is not None and snap is not None:
+                        try:
+                            macro_trends: dict[str, dict[str, float | None]] = {}
+                            if Fred is not None:
+                                try:
+                                    fred = Fred(api_key=fred_api_key)
+                                    trend_series = {"eurusd": "DEXUSEU", "ecb_rate": "ECBDFR"}
+                                    now = pd.Timestamp.now()
+                                    offsets = {"3m": pd.DateOffset(months=3), "6m": pd.DateOffset(months=6), "12m": pd.DateOffset(years=1)}
+                                    for key, series_id in trend_series.items():
+                                        try:
+                                            s = fred.get_series(series_id, observation_start=now - pd.DateOffset(years=1, months=1))
+                                            if s is not None and len(s) > 0:
+                                                s = s.dropna().sort_index()
+                                                trend_vals: dict[str, float | None] = {}
+                                                for period, offset in offsets.items():
+                                                    target_date = now - offset
+                                                    closest_idx = s.index.get_indexer([target_date], method="nearest")[0]
+                                                    if closest_idx >= 0 and closest_idx < len(s):
+                                                        trend_vals[period] = float(s.iloc[closest_idx])
+                                                    else:
+                                                        trend_vals[period] = None
+                                                macro_trends[key] = trend_vals
+                                        except Exception:
+                                            pass
+                                except Exception:
+                                    pass
+
+                            llm_prompt = build_llm_rebalance_report(
+                                portfolio=p,
+                                rebalance_table=table,
+                                diagnostics_table=diag,
+                                macro_snapshot=snap,
+                                current_value=float(current_value),
+                                new_cash=float(new_cash),
+                                macro_trends=macro_trends if macro_trends else None,
+                            )
+                        except Exception:
+                            pass
+
+                    # Store all results in session state
+                    st.session_state["rebalance_results"] = {
+                        "table_transposed": table_transposed,
+                        "diag_transposed": diag_transposed,
+                        "diag_error": diag_error,
+                        "snap": snap,
+                        "macro_chart_data": macro_chart_data,
+                        "llm_prompt": llm_prompt,
+                        "portfolio_name": getattr(p, "name", "Portfolio"),
+                    }
+                    # Clear any previous LLM response when recomputing
+                    st.session_state.pop("rebalance_llm_response", None)
+
+                except Exception as e:
+                    st.error(str(e))
+                    st.session_state.pop("rebalance_results", None)
+
+        # Display results from session state (persists across reruns)
+        if "rebalance_results" in st.session_state:
+            results = st.session_state["rebalance_results"]
+            
+            st.markdown("### Rebalancing actions")
+            st.dataframe(results["table_transposed"].round(2), use_container_width=True)
+
+            if results["diag_transposed"] is not None:
+                st.markdown("### Portfolio diagnostics")
+                st.dataframe(results["diag_transposed"].round(4), use_container_width=True)
+            elif results["diag_error"]:
+                st.caption(f"Diagnostics unavailable: {results['diag_error']}")
+
+            snap = results["snap"]
+            if snap is not None:
+                st.markdown("### Macro-economic overview")
+                st.caption(f"Data as of: {snap.asof.date()}")
+
+                m1, m2, m3 = st.columns(3)
+                with m1:
+                    st.metric("ECB Deposit Rate", f"{snap.ecb_dfr_pct:.2f}%")
+                    st.metric("DE CPI YoY", f"{snap.de_cpi_yoy_pct:.2f}%")
+                with m2:
+                    st.metric("US 10Y TIPS Yield", f"{snap.usd_10y_tips_yield_pct:.2f}%")
+                    st.metric("DE 10Y Yield", f"{snap.de_10y_yield_pct:.2f}%")
+                with m3:
+                    st.metric("DE 10Y Real Yield (proxy)", f"{snap.de_10y_real_yield_proxy_pct:.2f}%")
+                    st.metric("Global Earnings Yield Est.", f"{snap.global_earnings_yield_est_pct:.2f}%")
+
+                if results["macro_chart_data"]:
+                    st.markdown("#### Last 12 months trend")
+                    macro_df = pd.DataFrame(results["macro_chart_data"])
+                    x_axis_format = alt.X("Date:T", title="Date", axis=alt.Axis(format="%m/%Y"))
+                    macro_chart = (
+                        alt.Chart(macro_df)
+                        .mark_line(strokeWidth=2.0)
+                        .encode(
+                            x=x_axis_format,
+                            y=alt.Y("Value:Q", title="Rate (%)"),
+                            color=alt.Color("Indicator:N", title="Indicator"),
+                            tooltip=[
+                                alt.Tooltip("Date:T", title="Date"),
+                                alt.Tooltip("Indicator:N", title="Indicator"),
+                                alt.Tooltip("Value:Q", title="Value", format=".2f"),
+                            ],
+                        )
+                        .properties(height=300)
+                        .interactive()
+                    )
+                    st.altair_chart(macro_chart, use_container_width=True)
+            else:
+                st.warning("Could not fetch macro data. Check your FRED API key.")
+
+            # AI-Assisted Rebalancing section (combined prompt + query)
+            if results["llm_prompt"]:
+                st.markdown("### AI-Assisted Rebalancing")
+                st.caption("Use the prompt below with your preferred LLM, or query one directly.")
+
+                st.download_button(
+                    "Download prompt (.md)",
+                    data=results["llm_prompt"].encode("utf-8"),
+                    file_name=f"rebalance_prompt_{results['portfolio_name'].replace(' ', '_')}.md",
+                    mime="text/markdown",
+                    key="rebalance_download_prompt",
+                )
+                with st.expander("View prompt", expanded=False):
+                    st.markdown(results["llm_prompt"])
+
+                # Inline LLM query UI (no separate header)
+                _render_llm_query_ui(
+                    key_prefix="rebalance",
+                    llm_prompt=results["llm_prompt"],
+                    title="",  # No title, already under AI-Assisted Rebalancing
+                )
+
+
+elif page == "whatif":
+    st.markdown("### What if you add new assets?")
+    rebalance_frequency, _, rf_annual = _backtest_controls(key_prefix="whatif", show_initial_amount=False)
+    p, _ = portfolio_builder(key="whatif", title="Base portfolio", allow_value=False)
+    if p is not None:
+        # Load predefined candidate assets
+        whatif_assets_path = os.path.join(CACHE_DIR, "assets", "whatif.json")
+        available_candidates: list[dict[str, str]] = []
+        try:
+            with open(whatif_assets_path, "r", encoding="utf-8") as f:
+                whatif_data = json.load(f)
+                available_candidates = whatif_data.get("Assets", [])
+        except Exception as e:
+            st.warning(f"Could not load candidate assets from whatif.json: {e}")
+
+        # Get portfolio tickers to filter out already-included assets
+        portfolio_tickers_set = set(getattr(p, "tickers", []))
+
+        # Filter candidates: only show assets not already in the portfolio
+        filtered_candidates = [
+            asset for asset in available_candidates
+            if asset.get("Ticker", "") not in portfolio_tickers_set
+        ]
+
+        # Initialize variables
+        candidate_options: dict[str, str] = {}
+        selected_candidate_names: list[str] = []
+        candidate_ticker_to_name: dict[str, str] = {}
+
+        if not filtered_candidates:
+            st.info("All predefined candidate assets are already in the portfolio.")
+        else:
+            # Build options for multiselect: display name, store ticker
+            candidate_options = {asset["Name"]: asset["Ticker"] for asset in filtered_candidates}
+            selected_candidate_names = st.multiselect(
+                "Candidate assets to evaluate",
+                options=list(candidate_options.keys()),
+                default=[],
+                key="whatif_candidates",
+                help="Select one or more assets to analyze for potential inclusion in your portfolio.",
+            )
+            # Build mapping from ticker to name for display purposes
+            candidate_ticker_to_name = {asset["Ticker"]: asset["Name"] for asset in filtered_candidates}
+
+        # Get available assets with their weights for the source selection
+        assets_map = getattr(p, "assets", {})
+        target_weights_pct = getattr(p, "target_weights_pct", {})
+        source_options = []
+        for ticker in p.tickers:
+            label = assets_map.get(ticker, ticker)
+            weight_pct = target_weights_pct.get(ticker, 0.0)
+            source_options.append((ticker, f"{label} ({weight_pct:.1f}%)"))
+
+        col1, col2 = st.columns(2)
+        with col1:
+            source_asset_idx = st.selectbox(
+                "Fund new asset from",
+                options=range(len(source_options)),
+                format_func=lambda i: source_options[i][1],
+                index=0,
+                key="whatif_source_asset",
+            )
+            source_ticker = source_options[source_asset_idx][0] if source_options else None
+            max_swap_pct = target_weights_pct.get(source_ticker, 0.0) if source_ticker else 25.0
+
+        with col2:
+            swap_pct = st.number_input(
+                f"Allocation to new asset (%)",
+                min_value=1.0,
+                max_value=float(max_swap_pct),
+                value=min(5.0, float(max_swap_pct)),
+                step=1.0,
+                key="whatif_swap_pct",
+                help=f"Maximum: {max_swap_pct:.1f}% (current weight of selected source asset)",
+            )
+            swap_weight = swap_pct / 100.0
+
+        run = st.button("Run what-if", type="primary", key="whatif_run")
+
+        if run:
+            with st.spinner("Running what-if analysis..."):
+                try:
+                    # Get selected candidates (tickers) from multiselect
+                    if not filtered_candidates or not selected_candidate_names:
+                        raise ValueError("No candidate assets selected. Please select at least one asset.")
+
+                    candidates = [candidate_options[name] for name in selected_candidate_names]
+                    candidate_name_map = {candidate_options[name]: name for name in selected_candidate_names}
+
+                    if source_ticker is None:
+                        raise ValueError("No source asset selected.")
+
+                    # Variables to store for LLM prompt
+                    llm_scores_df = None
+                    llm_rrr_df = None
+                    llm_backtest_df = None
+
+                    base_target_weights = _target_weights_fraction(p)
+
+                    tickers_universe = list(getattr(p, "tickers", [])) + [c for c in candidates if c not in getattr(p, "tickers", [])]
+                    prices_universe = Portfolio.download_prices(tickers_universe)
+
+                    portfolio_tickers = list(getattr(p, "tickers", []))
+                    candidate_cols = [c for c in candidates if c in prices_universe.columns]
+                    cols_all = portfolio_tickers + candidate_cols
+                    raw = prices_universe[cols_all].copy().sort_index()
+                    firsts = raw.apply(lambda s: s.first_valid_index())
+                    lasts = raw.apply(lambda s: s.last_valid_index())
+                    if firsts.isna().any() or lasts.isna().any():
+                        missing = list(raw.columns[firsts.isna() | lasts.isna()])
+                        raise ValueError(f"Missing data for tickers: {missing}")
+                    start = pd.Timestamp(max(firsts))
+                    end = pd.Timestamp(min(lasts))
+                    if start > end:
+                        raise ValueError(f"No overlapping date range across all assets (start={start}, end={end}).")
+
+                    analysis_start_str = str(start.date())
+                    analysis_end_str = str(end.date())
+                    raw = raw.loc[start:end].copy()
+
+                    prices_portfolio = raw[portfolio_tickers].copy()
+                    prices_candidates = raw[candidate_cols].copy()
+
+                    px_p_me = Portfolio.resample_prices(Portfolio.fill_non_trading_days(prices_portfolio, freq="D"), freq="ME")
+                    px_c_me = Portfolio.resample_prices(Portfolio.fill_non_trading_days(prices_candidates, freq="D"), freq="ME")
+                    common_start_ts, _ = Portfolio.common_start_info(px_p_me, px_c_me)
+
+                    rets_candidates = Portfolio.monthly_returns_from_prices(prices_candidates, return_method="pct", common_start=common_start_ts)
+                    rets_portfolio = Portfolio.monthly_returns_from_prices(prices_portfolio, return_method="pct", common_start=common_start_ts)
+
+                    scores = diversification_scores(
+                        rets_candidates,
+                        rets_portfolio,
+                        portfolio_weights=base_target_weights,
+                        replace_from=source_ticker,
+                        replace_weight=float(swap_weight),
+                    )
+
+                    # Diversification scores table
+                    scores_transposed = None
+                    if not scores.empty:
+                        scores_display = scores.copy()
+                        scores_display.index = [candidate_name_map.get(t, t) for t in scores_display.index]
+                        pct_cols = ["delta_vol_if_swap", "delta_max_drawdown_if_swap", "cand_vol_ann"]
+                        for col in scores_display.columns:
+                            if col == "max_abs_corr_offender":
+                                continue
+                            elif col == "n_months_used":
+                                scores_display[col] = scores_display[col].apply(lambda x: f"{int(x)}" if pd.notna(x) else "—")
+                            elif col in pct_cols:
+                                scores_display[col] = scores_display[col].apply(lambda x: f"{x*100:.2f}%" if pd.notna(x) else "—")
+                            else:
+                                scores_display[col] = scores_display[col].apply(lambda x: f"{x:.2f}" if pd.notna(x) else "—")
+
+                        scores_display = scores_display.rename(columns={
+                            "mean_abs_corr_to_assets": "Avg |Corr| to Assets",
+                            "max_abs_corr_to_assets": "Max |Corr| to Assets",
+                            "max_abs_corr_offender": "Highest Corr Asset",
+                            "w_mean_abs_corr_to_assets": "Weighted Avg |Corr|",
+                            "corr_to_portfolio": "Corr to Portfolio",
+                            "delta_vol_if_swap": "Δ Volatility (swap)",
+                            "delta_max_drawdown_if_swap": "Δ |Max Drawdown| (swap)",
+                            "cand_vol_ann": "Candidate Vol (ann.)",
+                            "n_months_used": "Months of Data",
+                        })
+                        scores_transposed = scores_display.T
+                        llm_scores_df = scores_transposed
+
+                    # RRR Analysis (Portfolio Intuition)
+                    rrr_transposed = None
+                    rrr_error = None
+                    try:
+                        port_rets = rets_portfolio.copy()
+                        w_series = pd.Series(base_target_weights, dtype=float)
+                        w_series = w_series[w_series.index.isin(port_rets.columns)]
+                        w_series = w_series / w_series.sum() if w_series.sum() != 0 else w_series
+                        port_r = (port_rets[w_series.index] * w_series.values).sum(axis=1).dropna()
+
+                        if not port_r.empty:
+                            mu_p, vol_p = Portfolio.annualize_mean_std(port_r, periods_per_year=12)
+                            rrr_p = Portfolio.return_to_risk_ratio(mu_p, vol_p)
+
+                            rrr_rows = []
+                            for c in rets_candidates.columns:
+                                s = pd.to_numeric(rets_candidates[c], errors="coerce").dropna()
+                                if s.empty:
+                                    continue
+                                aligned = pd.concat([port_r.rename("port"), s.rename("cand")], axis=1).dropna()
+                                if aligned.shape[0] < 6:
+                                    continue
+                                rho = float(aligned["port"].corr(aligned["cand"]))
+                                mu_a, vol_a = Portfolio.annualize_mean_std(aligned["cand"], periods_per_year=12)
+
+                                if pd.notna(mu_a) and float(mu_a) > 0:
+                                    rrr_a = Portfolio.return_to_risk_ratio(mu_a, vol_a)
+                                    hurdle = float(rho) * float(rrr_p) if pd.notna(rho) and pd.notna(rrr_p) else float("nan")
+                                    margin = float(rrr_a - hurdle) if pd.notna(rrr_a) and pd.notna(hurdle) else float("nan")
+                                    rrr_pa = Portfolio.rrr_combination(mu_p=mu_p, vol_p=vol_p, mu_a=mu_a, vol_a=vol_a, rho=rho, w_a=float(swap_weight))
+                                    delta_rrr = float(rrr_pa - rrr_p) if pd.notna(rrr_pa) and pd.notna(rrr_p) else float("nan")
+                                    status = "PASS" if margin > 0 else "FAIL"
+                                else:
+                                    rrr_a = float("nan")
+                                    margin = float("nan")
+                                    rrr_pa = float("nan")
+                                    delta_rrr = float("nan")
+                                    status = "N/A (μ ≤ 0)"
+
+                                rrr_rows.append({
+                                    "Candidate": candidate_name_map.get(c, c),
+                                    "Portfolio RRR": f"{rrr_p:.2f}" if pd.notna(rrr_p) else "—",
+                                    "Asset RRR": f"{rrr_a:.2f}" if pd.notna(rrr_a) else "—",
+                                    "Correlation (ρ)": f"{rho:.2f}" if pd.notna(rho) else "—",
+                                    "Hurdle (ρ × RRR_p)": f"{hurdle:.2f}" if pd.notna(hurdle) else "—",
+                                    "Margin (RRR_a - Hurdle)": f"{margin:.2f}" if pd.notna(margin) else "—",
+                                    f"Combined RRR ({swap_pct:.0f}% swap)": f"{rrr_pa:.2f}" if pd.notna(rrr_pa) else "—",
+                                    "Δ RRR vs Portfolio": f"{delta_rrr:.2f}" if pd.notna(delta_rrr) else "—",
+                                    "Status": status,
+                                })
+
+                            if rrr_rows:
+                                rrr_df = pd.DataFrame(rrr_rows).set_index("Candidate")
+                                rrr_transposed = rrr_df.T
+                                llm_rrr_df = rrr_transposed
+                    except Exception as e:
+                        rrr_error = str(e)
+
+                    # Backtest comparison table
+                    backtest_df = None
+                    cand_weights: dict[str, dict[str, float]] = {}
+                    for c in candidates:
+                        if c not in prices_universe.columns:
+                            continue
+                        new_weights = base_target_weights.copy()
+                        new_weights[source_ticker] = new_weights.get(source_ticker, 0.0) - swap_weight
+                        new_weights[c] = swap_weight
+                        cand_weights[c] = new_weights
+
+                    if cand_weights:
+                        universe = Portfolio.fill_non_trading_days(raw[portfolio_tickers + list(cand_weights.keys())], freq="D")
+                        rows: list[dict[str, Any]] = []
+                        px_base = universe[portfolio_tickers]
+                        v_base = Portfolio.backtest_value_series(
+                            px_base, base_target_weights, rebalance_frequency=str(rebalance_frequency), initial_value=1.0
+                        )
+                        s_base = Portfolio.backtest_stats(v_base, rf_annual=float(rf_annual))
+                        rows.append({"Portfolio": "Baseline", **s_base})
+
+                        for c, w in cand_weights.items():
+                            cols = portfolio_tickers + [c]
+                            px = universe[cols]
+                            v = Portfolio.backtest_value_series(px, w, rebalance_frequency=str(rebalance_frequency), initial_value=1.0)
+                            s = Portfolio.backtest_stats(v, rf_annual=float(rf_annual))
+                            cand_name = candidate_name_map.get(c, c)
+                            rows.append({"Portfolio": f"Baseline + {cand_name}", **s})
+
+                        df = pd.DataFrame(rows).set_index("Portfolio")
+                        backtest_df = pd.DataFrame(index=df.index)
+                        backtest_df["Total Return (%)"] = (df["total_return"].astype(float) * 100.0).round(2)
+                        backtest_df["CAGR (%)"] = (df["cagr"].astype(float) * 100.0).round(2)
+                        backtest_df["Volatility (%)"] = (df["vol_annual"].astype(float) * 100.0).round(2)
+                        backtest_df["Max Drawdown (%)"] = (df["max_drawdown"].astype(float) * 100.0).round(2)
+                        backtest_df["Sharpe"] = df["sharpe"].astype(float).round(2)
+                        backtest_df["Sortino"] = df["sortino"].astype(float).round(2)
+                        llm_backtest_df = backtest_df
+
+                    # Generate LLM prompt
+                    llm_prompt = None
+                    try:
+                        candidate_names_list = [candidate_name_map.get(c, c) for c in candidates]
+                        llm_prompt = build_llm_whatif_report(
+                            portfolio=p,
+                            candidates=candidates,
+                            candidate_names=candidate_names_list,
+                            source_ticker=source_ticker,
+                            swap_weight=swap_weight,
+                            diversification_df=llm_scores_df,
+                            rrr_df=llm_rrr_df,
+                            backtest_df=llm_backtest_df,
+                            analysis_start=analysis_start_str,
+                            analysis_end=analysis_end_str,
+                        )
+                    except Exception:
+                        pass
+
+                    # Store all results in session state
+                    st.session_state["whatif_results"] = {
+                        "analysis_start": analysis_start_str,
+                        "analysis_end": analysis_end_str,
+                        "scores_transposed": scores_transposed,
+                        "rrr_transposed": rrr_transposed,
+                        "rrr_error": rrr_error,
+                        "backtest_df": backtest_df,
+                        "llm_prompt": llm_prompt,
+                        "portfolio_name": getattr(p, "name", "Portfolio"),
+                        "swap_pct": swap_pct,
+                    }
+                    # Clear any previous LLM response when recomputing
+                    st.session_state.pop("whatif_llm_response", None)
+
+                except Exception as e:
+                    st.error(str(e))
+                    st.session_state.pop("whatif_results", None)
+
+        # Display results from session state (persists across reruns)
+        if "whatif_results" in st.session_state:
+            results = st.session_state["whatif_results"]
+            
+            st.caption(f"Common analysis window: {results['analysis_start']} → {results['analysis_end']}")
+
+            # Diversification scores table
+            if results["scores_transposed"] is not None:
+                st.markdown("### Diversification analysis")
+                st.dataframe(results["scores_transposed"], use_container_width=True)
+
+            # RRR Analysis
+            st.markdown("### Return-to-Risk Ratio (RRR) analysis")
+            with st.expander("What is RRR analysis?", expanded=False):
+                st.markdown("""
+**RRR (Return-to-Risk Ratio)** analysis is based on the "Portfolio Intuition" paper (Kennedy, 2018).
+
+**Key concepts:**
+- **RRR** = Annualized Return / Annualized Volatility (similar to Sharpe, but without subtracting the risk-free rate)
+- **RRR_p**: The RRR of your current portfolio
+- **RRR_a**: The RRR of the candidate asset
+- **rho**: Correlation between the candidate and portfolio returns
+
+**The "bare minimum no-harm" condition:**
+For adding a new asset to not hurt the portfolio (as weight approaches 0): **RRR_a > rho x RRR_p**
+
+If the margin (RRR_a - rho x RRR_p) is positive, the asset passes this hurdle.
+
+**RRR_pa**: The combined portfolio RRR after allocating the specified swap weight to the candidate. If RRR_pa > RRR_p, adding the asset improves the portfolio's risk-adjusted returns.
+                """)
+
+            if results["rrr_transposed"] is not None:
+                st.dataframe(results["rrr_transposed"], use_container_width=True)
+            elif results["rrr_error"]:
+                st.caption(f"RRR analysis unavailable: {results['rrr_error']}")
+            else:
+                st.info("Could not compute RRR metrics (insufficient data or portfolio returns unavailable).")
+
+            # Backtest comparison table
+            if results["backtest_df"] is not None:
+                st.markdown("### Backtest comparison")
+                st.dataframe(results["backtest_df"], use_container_width=True)
+
+            # AI-Assisted Analysis section (combined prompt + query)
+            if results["llm_prompt"]:
+                st.markdown("### AI-Assisted Asset Selection")
+                st.caption("Use the prompt below with your preferred LLM, or query one directly.")
+
+                st.download_button(
+                    "Download prompt (.md)",
+                    data=results["llm_prompt"].encode("utf-8"),
+                    file_name=f"whatif_prompt_{results['portfolio_name'].replace(' ', '_')}.md",
+                    mime="text/markdown",
+                    key="whatif_download_prompt",
+                )
+                with st.expander("View prompt", expanded=False):
+                    st.markdown(results["llm_prompt"])
+
+                # Inline LLM query UI (no separate header)
+                _render_llm_query_ui(
+                    key_prefix="whatif",
+                    llm_prompt=results["llm_prompt"],
+                    title="",  # No title, already under AI-Assisted Asset Selection
+                )
+
+

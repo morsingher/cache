@@ -1,0 +1,9 @@
+__pycache__/
+.venv/
+venv/
+*.pyc
+.env
+keys.txt
+cache/TODO.txt
+*.pdf
+*.png
