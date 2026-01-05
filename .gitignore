@@ -2,6 +2,7 @@ keys.txt
 cache/TODO.txt
 *.pdf
 *.png
+.streamlit/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

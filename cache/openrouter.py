@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import requests
+import streamlit as st
 
 try:
     from openai import OpenAI
@@ -54,8 +55,8 @@ class ChatResponse:
 
 
 def get_api_key() -> str | None:
-    """Get OpenRouter API key from environment."""
-    return os.environ.get("OPENROUTER_API_KEY", "").strip() or None
+    """Get OpenRouter API key from Streamlit secrets."""
+    return st.secrets.get("OPENROUTER_API_KEY", "").strip() or None
 
 
 def fetch_free_models(api_key: str | None = None) -> list[str]:

@@ -123,9 +123,9 @@ def _rf_annual_controls(*, key_prefix: str, default_series: str = "ECBDFR") -> f
         st.warning("fredapi not available; using 0%.")
         return 0.0
 
-    api_key = os.environ.get("FRED_API_KEY", "").strip()
+    api_key = st.secrets.get("FRED_API_KEY", "").strip()
     if not api_key:
-        st.error("Set the `FRED_API_KEY` environment variable to use FRED data.")
+        st.error("Set `FRED_API_KEY` in `.streamlit/secrets.toml` to use FRED data.")
         return 0.0
 
     try:
@@ -729,7 +729,7 @@ if page == "home":
     st.markdown(
         """
 <div style="text-align:center; font-size: 1.5rem; font-style: italic; font-weight: 600; letter-spacing: 0.01em; margin: 0 0 1.1rem 0;">
-  Hello Marco, what do you need today?
+  Hi, what do you need today?
 </div>
 """,
         unsafe_allow_html=True,
@@ -1267,10 +1267,10 @@ elif page == "rebalance":
         st.markdown("### Settings")
         new_cash = st.number_input("New cash to allocate (EUR)", min_value=0.0, value=2_000.0, step=100.0, key="rebalance_cash")
 
-        # Get FRED API key from environment
-        fred_api_key = os.environ.get("FRED_API_KEY", "").strip()
+        # Get FRED API key from secrets
+        fred_api_key = st.secrets.get("FRED_API_KEY", "").strip()
         if not fred_api_key:
-            st.error("FRED_API_KEY environment variable is not set. Please set it to enable macro-economic data.")
+            st.error("FRED_API_KEY is not set. Please add it to `.streamlit/secrets.toml`.")
 
         run = st.button("Compute rebalance", type="primary", key="rebalance_run")
         if run:
