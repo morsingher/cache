@@ -1,0 +1,108 @@
+{
+    "Assets": [
+        {
+            "Name": "Stocks",
+            "Ticker": "ACWE.MI"
+        },
+        {
+            "Name": "Bonds",
+            "Ticker": "AGGH.MI"
+        },
+        {
+            "Name": "Gold",
+            "Ticker": "SGLD.MI"
+        },
+        {
+            "Name": "Crypto BTC",
+            "Ticker": "BTC-EUR"
+        },
+        {
+            "Name": "Managed Futures",
+            "Ticker": "DBMF"
+        },
+        {
+            "Name": "Commodity Carry",
+            "Ticker": "UEQC.DE"
+        },
+        {
+            "Name": "Commodity Beta",
+            "Ticker": "CMOD.MI"
+        },
+        {
+            "Name": "Stocks Multifactor", 
+            "Ticker": "JPGL.MI"
+        },
+        {
+            "Name": "Cash", 
+            "Ticker": "XEON.MI"
+        },
+        {
+            "Name": "Crypto ETH", 
+            "Ticker": "ETH-EUR"
+        },
+        {
+            "Name": "Bonds EUR Infl", 
+            "Ticker": "IBCI.MI"
+        },
+        {
+            "Name": "Real Estate", 
+            "Ticker": "EPRA.MI"
+        },
+        {
+            "Name": "Stocks Min Vol", 
+            "Ticker": "MVOL.MI"
+        },
+        {
+            "Name": "Stocks Momentum", 
+            "Ticker": "IWMO.MI"
+        },
+        {
+            "Name": "Bonds EUR HY", 
+            "Ticker": "EHYA.MI"
+        },
+        {
+            "Name": "Silver", 
+            "Ticker": "XAD6.MI"
+        },
+        {
+            "Name": "Crypto SOL", 
+            "Ticker": "SOL-EUR"
+        },
+        {
+            "Name": "Crypto XRP", 
+            "Ticker": "XRP-EUR"
+        },
+        {
+            "Name": "Infl Exp EUR", 
+            "Ticker": "INFL.MI"
+        },
+        {
+            "Name": "Stocks Value", 
+            "Ticker": "IWVL.MI"
+        },
+        {
+            "Name": "Stocks Quality", 
+            "Ticker": "IWQU.MI"
+        },
+        {
+            "Name": "Stocks Small Cap", 
+            "Ticker": "IUSN.DE"
+        },
+        {
+            "Name": "Stocks SCV", 
+            "Ticker": "ZPRVX"
+        },
+        {
+            "Name": "Stocks High Div", 
+            "Ticker": "GGRA.MI"
+        },
+        {
+            "Name": "Bonds EUR", 
+            "Ticker": "VGEA.MI"
+        },
+        {
+            "Name": "Commodity Mix", 
+            "Ticker": "CCUSAS.MI"
+        }
+    ]
+}

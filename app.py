@@ -46,6 +46,25 @@ except Exception:  # pragma: no cover
     Fred = None
 
 
+# --- Caching for expensive operations ---
+# Cache Portfolio objects and price downloads to avoid re-fetching on every widget interaction.
+# TTL of 1 hour ensures data is refreshed periodically but not on every rerun.
+
+@st.cache_resource(ttl=3600, show_spinner="Loading portfolio data...")
+def _cached_load_portfolio(path: str) -> Portfolio:
+    """
+    Cache the entire Portfolio object (including downloaded prices).
+    Uses cache_resource since Portfolio objects are not serializable.
+    """
+    return Portfolio.from_json(path)
+
+
+@st.cache_data(ttl=3600, show_spinner="Downloading price data...")
+def _cached_download_prices(tickers_tuple: tuple[str, ...]) -> pd.DataFrame:
+    """Cached wrapper for Portfolio.download_prices."""
+    return Portfolio.download_prices(list(tickers_tuple))
+
+
 st.set_page_config(page_title="CACHE", page_icon="€", layout="centered")
 
 # Minimal styling: layout adjustments + red "Back" button only.
@@ -94,7 +113,7 @@ st.markdown(
 def _rf_annual_controls(*, key_prefix: str, default_series: str = "ECBDFR") -> float:
     mode = st.radio(
         "Risk-free rate",
-        options=["Manual", "FRED"],
+        options=["Manual", "Federal Reserve Economic Data (FRED)"],
         index=0,
         horizontal=True,
         key=f"{key_prefix}_rf_mode",
@@ -103,7 +122,7 @@ def _rf_annual_controls(*, key_prefix: str, default_series: str = "ECBDFR") -> f
 
     if mode == "Manual":
         rf = st.number_input(
-            "rf (annual, decimal)",
+            "Custom value (annual, decimal)",
             min_value=0.0,
             max_value=1.0,
             value=0.0,
@@ -112,7 +131,8 @@ def _rf_annual_controls(*, key_prefix: str, default_series: str = "ECBDFR") -> f
         )
         return float(rf)
 
-    series_id = st.text_input("FRED series id", value=default_series, key=f"{key_prefix}_rf_series")
+    # series_id = st.text_input("FRED series id", value=default_series, key=f"{key_prefix}_rf_series")
+    series_id = default_series
     if Fred is None:
         st.warning("fredapi not available; using 0%.")
         return 0.0
@@ -174,6 +194,59 @@ def _safe_temp_json(content: bytes) -> str:
     return f.name
 
 
+def _load_available_assets() -> list[dict[str, str]]:
+    """Load available assets from list.json."""
+    assets_path = os.path.join(CACHE_DIR, "assets", "list.json")
+    try:
+        with open(assets_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            return data.get("Assets", [])
+    except Exception:
+        return []
+
+
+def _get_asset_options() -> tuple[list[str], dict[str, tuple[str, str]]]:
+    """
+    Get asset options for dropdown.
+    Returns:
+        - List of display strings: "Name (Ticker)" sorted alphabetically by name
+        - Dict mapping display string to (Name, Ticker)
+    """
+    assets = _load_available_assets()
+    options = []
+    mapping = {}
+    for asset in assets:
+        name = asset.get("Name", "")
+        ticker = asset.get("Ticker", "")
+        if name and ticker:
+            display = f"{name} ({ticker})"
+            options.append(display)
+            mapping[display] = (name, ticker)
+    # Sort options alphabetically by asset name (case-insensitive)
+    options.sort(key=lambda x: x.lower())
+    return options, mapping
+
+
+def _render_portfolio_preview(p: Portfolio) -> None:
+    """Render a compact allocation preview for a portfolio."""
+    assets_map = getattr(p, "assets", {})
+    target_weights_pct = getattr(p, "target_weights_pct", {})
+    tickers = getattr(p, "tickers", [])
+    name = getattr(p, "name", "Portfolio")
+    
+    if not tickers or not target_weights_pct:
+        return
+    
+    parts = []
+    for ticker in tickers:
+        asset_name = assets_map.get(ticker, ticker)
+        weight = target_weights_pct.get(ticker, 0.0)
+        parts.append(f"{asset_name} ({weight:.1f}%)")
+    
+    allocation_str = ", ".join(parts)
+    st.caption(f"**{name}:** {allocation_str}")
+
+
 def _portfolio_json_from_manual(
     *,
     portfolio_name: str,
@@ -191,8 +264,8 @@ def _portfolio_json_from_manual(
             }
         )
     obj: dict[str, Any] = {"Name": str(portfolio_name).strip() or "Portfolio", "Assets": assets}
-    if value_eur is not None:
-        obj["Value"] = float(value_eur)
+    # Default to 100k EUR if value not specified
+    obj["Value"] = float(value_eur) if value_eur is not None else 100_000.0
     return obj
 
 
@@ -288,7 +361,9 @@ def portfolio_builder(
 
         path = st.selectbox("Select a portfolio JSON", options=paths, format_func=lambda p: os.path.basename(p), key=f"{key}_builtin")
         try:
-            return Portfolio.from_json(path), None
+            loaded_p = _cached_load_portfolio(path)
+            _render_portfolio_preview(loaded_p)
+            return loaded_p, None
         except Exception as e:
             st.error(str(e))
             return None, None
@@ -299,7 +374,9 @@ def portfolio_builder(
             return None, None
         try:
             tmp = _safe_temp_json(up.getvalue())
-            return Portfolio.from_json(tmp), None
+            loaded_p = Portfolio.from_json(tmp)
+            _render_portfolio_preview(loaded_p)
+            return loaded_p, None
         except Exception as e:
             st.error(str(e))
             return None, None
@@ -313,26 +390,69 @@ def portfolio_builder(
         if allow_value:
             value_eur = st.number_input("Current value (EUR)", min_value=0.0, value=80_000.0, step=1_000.0, key=f"{key}_value")
 
-    st.caption("Tip: for what-if, at least one row’s **Asset Name** should be exactly `Stocks` (case-insensitive).")
+    # st.caption("Tip: for what-if, at least one row's **Asset** should be `Stocks`.")
 
+    # Load available assets for dropdown
+    asset_options, asset_mapping = _get_asset_options()
+    if not asset_options:
+        st.error("No assets available. Check `cache/assets/list.json`.")
+        return None, None
+
+    # Default selections: 60% Stocks, 40% Bonds (find by name prefix)
+    def _find_asset_by_prefix(opts: list[str], prefix: str) -> str:
+        for opt in opts:
+            if opt.lower().startswith(prefix.lower()):
+                return opt
+        return opts[0] if opts else ""
+    
+    default_stocks = _find_asset_by_prefix(asset_options, "Stocks (")
+    default_bonds = _find_asset_by_prefix(asset_options, "Bonds (")
+    # Fallback if not found
+    if not default_stocks and asset_options:
+        default_stocks = asset_options[0]
+    if not default_bonds and len(asset_options) > 1:
+        default_bonds = asset_options[1] if asset_options[1] != default_stocks else (asset_options[0] if asset_options[0] != default_stocks else "")
+    
     default = pd.DataFrame(
         [
-            {"Asset Name": "Stocks", "Ticker": "ACWE.MI", "Weight (%)": 60.0, "Target (%)": 60.0},
-            {"Asset Name": "Bonds", "Ticker": "AGGH.MI", "Weight (%)": 40.0, "Target (%)": 40.0},
+            {"Asset": default_stocks, "Weight (%)": 60.0, "Target (%)": 60.0},
+            {"Asset": default_bonds, "Weight (%)": 40.0, "Target (%)": 40.0},
         ]
     )
-    df = st.data_editor(
+    edited_df = st.data_editor(
         default,
         num_rows="dynamic",
         use_container_width=True,
         key=f"{key}_editor",
         column_config={
-            "Asset Name": st.column_config.TextColumn(required=True),
-            "Ticker": st.column_config.TextColumn(required=True),
+            "Asset": st.column_config.SelectboxColumn(
+                "Asset",
+                options=asset_options,
+                required=True,
+                help="Select an asset from the available list",
+            ),
             "Weight (%)": st.column_config.NumberColumn(required=True, min_value=0.0),
             "Target (%)": st.column_config.NumberColumn(required=True, min_value=0.0),
         },
     )
+    
+    # Convert to records and back to completely flatten any MultiIndex structure
+    # This avoids "Not allowed to merge between different levels" errors from st.data_editor
+    df = pd.DataFrame(edited_df.to_dict("records"))
+    
+    # Parse asset selections to extract Name and Ticker
+    asset_names = []
+    tickers = []
+    for x in df["Asset"].tolist():
+        if pd.notna(x) and x and x in asset_mapping:
+            name, ticker = asset_mapping[x]
+            asset_names.append(name)
+            tickers.append(ticker)
+        else:
+            asset_names.append("")
+            tickers.append("")
+    df["Asset Name"] = asset_names
+    df["Ticker"] = tickers
 
     normalize = st.checkbox("Auto-normalize Weight/Target columns to sum to 100", value=True, key=f"{key}_normalize")
 
@@ -376,6 +496,7 @@ def _manual_portfolio_builder(
     *,
     key: str,
     title: str = "Manual Portfolio",
+    show_json_download: bool = False,
 ) -> Portfolio | None:
     """
     Simplified portfolio builder that only allows manual entry (no JSON options).
@@ -388,24 +509,67 @@ def _manual_portfolio_builder(
         portfolio_name = st.text_input("Portfolio name", value="My Portfolio", key=f"{key}_name")
     col2.empty()
 
+    # Load available assets for dropdown
+    asset_options, asset_mapping = _get_asset_options()
+    if not asset_options:
+        st.error("No assets available. Check `cache/assets/list.json`.")
+        return None
+
+    # Default selections: 60% Stocks, 40% Bonds (find by name prefix)
+    def _find_asset_by_prefix(opts: list[str], prefix: str) -> str:
+        for opt in opts:
+            if opt.lower().startswith(prefix.lower()):
+                return opt
+        return opts[0] if opts else ""
+    
+    default_stocks = _find_asset_by_prefix(asset_options, "Stocks (")
+    default_bonds = _find_asset_by_prefix(asset_options, "Bonds (")
+    # Fallback if not found
+    if not default_stocks and asset_options:
+        default_stocks = asset_options[0]
+    if not default_bonds and len(asset_options) > 1:
+        default_bonds = asset_options[1] if asset_options[1] != default_stocks else (asset_options[0] if asset_options[0] != default_stocks else "")
+    
     default = pd.DataFrame(
         [
-            {"Asset Name": "Stocks", "Ticker": "ACWE.MI", "Weight (%)": 60.0, "Target (%)": 60.0},
-            {"Asset Name": "Bonds", "Ticker": "AGGH.MI", "Weight (%)": 40.0, "Target (%)": 40.0},
+            {"Asset": default_stocks, "Weight (%)": 60.0, "Target (%)": 60.0},
+            {"Asset": default_bonds, "Weight (%)": 40.0, "Target (%)": 40.0},
         ]
     )
-    df = st.data_editor(
+    edited_df = st.data_editor(
         default,
         num_rows="dynamic",
         use_container_width=True,
         key=f"{key}_editor",
         column_config={
-            "Asset Name": st.column_config.TextColumn(required=True),
-            "Ticker": st.column_config.TextColumn(required=True),
+            "Asset": st.column_config.SelectboxColumn(
+                "Asset",
+                options=asset_options,
+                required=True,
+                help="Select an asset from the available list",
+            ),
             "Weight (%)": st.column_config.NumberColumn(required=True, min_value=0.0),
             "Target (%)": st.column_config.NumberColumn(required=True, min_value=0.0),
         },
     )
+    
+    # Convert to records and back to completely flatten any MultiIndex structure
+    # This avoids "Not allowed to merge between different levels" errors from st.data_editor
+    df = pd.DataFrame(edited_df.to_dict("records"))
+    
+    # Parse asset selections to extract Name and Ticker
+    asset_names = []
+    tickers = []
+    for x in df["Asset"].tolist():
+        if pd.notna(x) and x and x in asset_mapping:
+            name, ticker = asset_mapping[x]
+            asset_names.append(name)
+            tickers.append(ticker)
+        else:
+            asset_names.append("")
+            tickers.append("")
+    df["Asset Name"] = asset_names
+    df["Ticker"] = tickers
 
     normalize = st.checkbox("Auto-normalize Weight/Target columns to sum to 100", value=True, key=f"{key}_normalize")
 
@@ -423,6 +587,23 @@ def _manual_portfolio_builder(
             value_eur=None,
             normalize=bool(normalize),
         )
+        
+        # Show JSON download/preview if requested
+        if show_json_download:
+            built_json_obj = _portfolio_json_from_manual(portfolio_name=portfolio_name, df=df, value_eur=None)
+            c1, c2 = st.columns([1, 2])
+            with c1:
+                st.download_button(
+                    "Download JSON",
+                    data=json.dumps(built_json_obj, indent=2).encode("utf-8"),
+                    file_name=f"{(portfolio_name or 'portfolio').strip().replace(' ', '_')}.json",
+                    mime="application/json",
+                    key=f"{key}_download",
+                )
+            with c2:
+                with st.expander("Preview JSON"):
+                    st.code(json.dumps(built_json_obj, indent=2), language="json")
+        
         return p
     except Exception as e:
         st.error(str(e))
@@ -432,26 +613,47 @@ def _manual_portfolio_builder(
 def _rolling_correlation_to_stocks(p: Portfolio, window_days: int = 252) -> pd.DataFrame:
     """
     Computes rolling correlations (window_days) of every non-stock asset versus the portfolio's stock sleeve.
+    If no stocks are in the portfolio, downloads external stocks data (ACWE.MI) for comparison.
     """
+    # Default stocks ticker to use when portfolio has no stocks
+    DEFAULT_STOCKS_TICKER = "ACWE.MI"
+    
     prices = p._prices_df().dropna(how="all").sort_index()
     if prices.empty:
         return pd.DataFrame()
 
-    returns = prices.pct_change().dropna(how="all")
     assets_map: dict[str, str] = getattr(p, "assets", {})
     tickers: list[str] = list(getattr(p, "tickers", []))
     stock_tickers = [t for t in tickers if assets_map.get(t, "").strip().lower() == "stocks"]
+    
+    # If no stocks in portfolio, download external stocks data
     if not stock_tickers:
-        return pd.DataFrame()
-
-    stock_returns = returns[stock_tickers].mean(axis=1).dropna()
+        try:
+            stocks_prices = _cached_download_prices((DEFAULT_STOCKS_TICKER,))
+            if stocks_prices.empty or DEFAULT_STOCKS_TICKER not in stocks_prices.columns:
+                return pd.DataFrame()
+            # Align external stocks with portfolio prices
+            stocks_prices = stocks_prices[DEFAULT_STOCKS_TICKER].reindex(prices.index).ffill().bfill()
+            stock_returns = stocks_prices.pct_change().dropna()
+            # All portfolio assets should be correlated vs stocks
+            non_stock_tickers = list(tickers)
+        except Exception:
+            return pd.DataFrame()
+    else:
+        returns = prices.pct_change().dropna(how="all")
+        stock_returns = returns[stock_tickers].mean(axis=1).dropna()
+        non_stock_tickers = [t for t in tickers if t not in stock_tickers]
+    
     if stock_returns.empty:
         return pd.DataFrame()
 
+    # Compute returns for portfolio assets
+    returns = prices.pct_change().dropna(how="all")
+    
     min_periods = min(window_days, 126)
     corr_series: list[pd.Series] = []
-    for ticker in p.tickers:
-        if ticker in stock_tickers or ticker not in returns.columns:
+    for ticker in non_stock_tickers:
+        if ticker not in returns.columns:
             continue
         series = returns[ticker].dropna()
         if series.empty:
@@ -839,9 +1041,7 @@ elif page == "analyze":
                     asset_values = float(initial_amount) * (prices_filtered / prices_filtered.iloc[0])
                     asset_values = asset_values.rename(columns={t: p._label(t) for t in asset_values.columns})
 
-                    # Compute correlations
-                    assets_map = getattr(p, "assets", {})
-                    has_stock_label = any(str(name).strip().lower() == "stocks" for name in assets_map.values())
+                    # Compute correlations (uses external stocks data if no stocks in portfolio)
                     corr_df = _rolling_correlation_to_stocks(p)
                     if user_start and user_end and not corr_df.empty:
                         corr_df = corr_df.loc[str(user_start):str(user_end)]
@@ -860,7 +1060,6 @@ elif page == "analyze":
                         "stats": stats,
                         "asset_values": asset_values,
                         "corr_df": corr_df,
-                        "has_stock_label": has_stock_label,
                         "alloc_df": alloc_df,
                     }
 
@@ -883,6 +1082,19 @@ elif page == "analyze":
             max_dd = stats.get("max_drawdown", float("nan"))
             max_dd_display = f"{max_dd*100:.2f}%" if np.isfinite(max_dd) else "—"
             m5.metric("Max Drawdown", max_dd_display)
+
+            with st.expander("What do these metrics mean?", expanded=False):
+                st.markdown("""
+**CAGR (Compound Annual Growth Rate)** — The average annual return assuming profits are reinvested. A 10% CAGR means the portfolio grew by 10% per year on average.
+
+**Volatility (annualized)** — A measure of how much returns fluctuate. Higher volatility means more uncertainty. Typically, 10-15% is moderate; above 20% is considered high.
+
+**Sharpe Ratio** — Risk-adjusted return calculated as (Return - Risk-free rate) / Volatility. Higher is better: below 0.5 is poor; 0.5-1.0 is acceptable; above 1.0 is good; above 2.0 is excellent.
+
+**Sortino Ratio** — Similar to Sharpe, but only penalizes *downside* volatility (losses), not upside movements. More relevant if you care primarily about avoiding losses rather than overall stability.
+
+**Max Drawdown** — The largest peak-to-trough decline during the period. A -30% max drawdown means at some point the portfolio lost 30% from its previous high before recovering.
+                """)
 
             # Pie chart
             alloc_df = results["alloc_df"]
@@ -967,10 +1179,7 @@ elif page == "analyze":
 
                 # Correlation chart
                 corr_df = results["corr_df"]
-                has_stock_label = results["has_stock_label"]
-                if not has_stock_label:
-                    st.info("Label at least one asset as 'Stocks' to view rolling correlations.")
-                elif corr_df.empty:
+                if corr_df.empty:
                     st.info("Not enough data to compute rolling correlations versus Stocks.")
                 else:
                     st.markdown("#### Rolling 1Y correlation vs Stocks")
@@ -1011,6 +1220,25 @@ elif page == "analyze":
                         st.altair_chart((corr_chart + zero_line).interactive(), use_container_width=True)
                     else:
                         st.info("Select at least one asset to display the chart.")
+                    
+                    with st.expander("What does this chart show?", expanded=False):
+                        st.markdown("""
+This chart shows how each non-stock asset's returns have moved relative to your stock allocation over rolling 1-year windows.
+
+**Why correlate against Stocks?** Stocks are typically the core growth engine of a portfolio and the primary source of both returns and risk. The goal of diversification is to hold other assets that behave differently from stocks, especially during downturns, so they can cushion losses when stocks fall.
+
+**Interpreting the values:**
+
+**+1.0** — Moves perfectly in sync with stocks (no diversification benefit).
+
+**0.0** — No relationship with stocks (good diversification).
+
+**-1.0** — Moves opposite to stocks (strong hedge, rare in practice).
+
+**Reference ranges:** Correlations below 0.3 provide meaningful diversification. Correlations above 0.6 suggest the asset moves largely with stocks and adds limited protection. Negative correlations are ideal during stock downturns but uncommon for most asset classes.
+
+**Why "rolling"?** Correlations change over time, especially during market stress. A bond fund that normally has low correlation to stocks may suddenly become more correlated during a crisis. This chart helps you see how stable the diversification benefit has been historically.
+                        """)
 
 
 elif page == "compare":
@@ -1035,19 +1263,51 @@ elif page == "compare":
         default=builtin_paths[:2] if len(builtin_paths) >= 2 else [],
         key="compare_builtin",
     )
+    
+    # Show previews for selected built-in portfolios
+    for path in selected_builtin:
+        try:
+            p_preview = _cached_load_portfolio(path)
+            _render_portfolio_preview(p_preview)
+        except Exception:
+            pass
 
     uploaded = st.file_uploader("Upload additional portfolio JSONs", type=["json"], accept_multiple_files=True, key="compare_upload")
-    include_manual = st.checkbox("Include one manual portfolio", value=False, key="compare_include_manual")
-
-    manual_portfolio: Portfolio | None = None
-    if include_manual:
-        manual_portfolio = _manual_portfolio_builder(key="compare_manual", title="Manual portfolio")
+    
+    # Show previews for uploaded portfolios
+    if uploaded:
+        for up in uploaded:
+            try:
+                tmp = _safe_temp_json(up.getvalue())
+                p_preview = Portfolio.from_json(tmp)
+                _render_portfolio_preview(p_preview)
+            except Exception:
+                pass
+    
+    # Multiple manual portfolios
+    st.markdown("#### Manual portfolios")
+    num_manual = st.number_input(
+        "Number of manual portfolios to add",
+        min_value=0,
+        max_value=5,
+        value=0,
+        step=1,
+        key="compare_num_manual",
+    )
+    
+    manual_portfolios: list[Portfolio] = []
+    for i in range(int(num_manual)):
+        if i > 0:
+            st.divider()
+        mp = _manual_portfolio_builder(key=f"compare_manual_{i}", title="", show_json_download=True)
+        if mp is not None:
+            manual_portfolios.append(mp)
 
     # Collect all portfolios to determine available date range
     all_portfolios: list[tuple[str, Portfolio]] = []
     for path in selected_builtin:
         try:
-            p_temp = Portfolio.from_json(path)
+            p_temp = _cached_load_portfolio(path)
             name = getattr(p_temp, "name", None) or os.path.basename(path)
             all_portfolios.append((str(name), p_temp))
         except Exception:
@@ -1061,8 +1321,8 @@ elif page == "compare":
                 all_portfolios.append((str(name), p_temp))
             except Exception:
                 pass
-    if manual_portfolio is not None:
-        all_portfolios.append((getattr(manual_portfolio, "name", "Manual"), manual_portfolio))
+    for mp in manual_portfolios:
+        all_portfolios.append((getattr(mp, "name", "Manual"), mp))
 
     # Determine common date range across all selected portfolios
     available_start, available_end = None, None
@@ -1222,6 +1482,25 @@ elif page == "compare":
                 pretty[["Sharpe", "Sortino"]] = pretty[["Sharpe", "Sortino"]].astype(float).round(2)
                 st.dataframe(pretty, use_container_width=True)
 
+                with st.expander("What do these metrics mean?", expanded=False):
+                    st.markdown("""
+**Total Return** — Cumulative gain/loss over the entire period. A 50% total return means €10,000 became €15,000.
+
+**CAGR (Compound Annual Growth Rate)** — Average annual return assuming reinvestment. Useful for comparing portfolios across different time periods.
+
+**Volatility (annualized)** — How much returns fluctuate year-to-year. Lower values indicate more stable returns.
+
+**Sharpe Ratio** — Risk-adjusted return calculated as (Return - Risk-free) / Volatility. Higher is better; it measures return earned per unit of risk taken.
+
+**Sortino Ratio** — Like Sharpe, but only penalizes downside volatility. More relevant if you're primarily concerned about losses rather than overall stability.
+
+**Max Drawdown** — The worst peak-to-trough decline, showing the maximum pain an investor would have experienced during the period.
+
+**Max Gain** — The best peak-to-trough gain, showing the maximum upside captured during the period.
+
+*A portfolio with higher CAGR but also higher Max Drawdown may not suit risk-averse investors.*
+                    """)
+
                 # Build Altair chart
                 st.markdown("#### Portfolio value over time")
                 chart_data = []
@@ -1377,11 +1656,100 @@ elif page == "rebalance":
             results = st.session_state["rebalance_results"]
             
             st.markdown("### Rebalancing actions")
-            st.dataframe(results["table_transposed"].round(2), use_container_width=True)
+            
+            # Extract data for visualization
+            table_t = results["table_transposed"]
+            
+            # Compute deviation from Current Weight - Target Weight
+            deviation_data = None
+            try:
+                current_row = None
+                target_row = None
+                for row_name in table_t.index:
+                    if "current" in row_name.lower() and "weight" in row_name.lower():
+                        current_row = row_name
+                    if "target" in row_name.lower() and "weight" in row_name.lower():
+                        target_row = row_name
+                
+                if current_row and target_row:
+                    current_vals = table_t.loc[current_row].astype(float)
+                    target_vals = table_t.loc[target_row].astype(float)
+                    deviations = current_vals - target_vals
+                    deviation_data = pd.DataFrame({
+                        "Asset": deviations.index,
+                        "Deviation (%)": deviations.values
+                    })
+            except Exception:
+                deviation_data = None
+            
+            # Show table first, then chart below
+            st.dataframe(table_t.round(2), use_container_width=True)
+            
+            if deviation_data is not None and not deviation_data.empty:
+                st.markdown("#### Deviation from target")
+                deviation_chart = (
+                    alt.Chart(deviation_data)
+                    .mark_bar()
+                    .encode(
+                        y=alt.Y("Asset:N", title=None, sort="-x"),
+                        x=alt.X("Deviation (%):Q", title="Deviation (%)", 
+                                scale=alt.Scale(domain=[
+                                    min(-5, deviation_data["Deviation (%)"].min() - 1),
+                                    max(5, deviation_data["Deviation (%)"].max() + 1)
+                                ])),
+                        color=alt.condition(
+                            alt.datum["Deviation (%)"] > 0,
+                            alt.value("#ef4444"),  # Red for overweight
+                            alt.value("#22c55e")   # Green for underweight
+                        ),
+                        tooltip=[
+                            alt.Tooltip("Asset:N", title="Asset"),
+                            alt.Tooltip("Deviation (%):Q", title="Deviation", format="+.2f"),
+                        ],
+                    )
+                    .properties(height=max(150, len(deviation_data) * 30))
+                )
+                zero_line = alt.Chart(pd.DataFrame({"x": [0]})).mark_rule(
+                    color="#888888", strokeDash=[4, 4]
+                ).encode(x="x:Q")
+                st.altair_chart((deviation_chart + zero_line), use_container_width=True)
+                st.caption("🔴 Overweight | 🟢 Underweight")
+            
+            with st.expander("How to read this", expanded=False):
+                st.markdown("""
+**Table rows:**
+
+**Current Weight (%)** — Your current allocation to each asset based on current portfolio value.
+
+**Target Weight (%)** — Your desired long-term allocation to each asset.
+
+**Cash Allocation (EUR)** — The amount of new cash to invest in each asset to move toward target weights.
+
+**New Weight (%)** — Your projected allocation after investing the new cash as recommended.
+
+**Deviation chart:** Shows how far each asset deviates from its target weight. Red bars (positive) indicate overweight positions; green bars (negative) indicate underweight positions that should be prioritized for new cash.
+
+The algorithm prioritizes underweight assets while ensuring no selling is required.
+                """)
 
             if results["diag_transposed"] is not None:
                 st.markdown("### Portfolio diagnostics")
                 st.dataframe(results["diag_transposed"].round(4), use_container_width=True)
+                
+                with st.expander("What do these diagnostics mean?", expanded=False):
+                    st.markdown("""
+These diagnostics help you understand recent portfolio behavior over the last ~12 months.
+
+**CAGR (12m, %)** — Compound Annual Growth Rate over the last 12 months. Shows how much each asset has returned recently.
+
+**EWMA Price Distance % (3m/6m/12m)** — How far the current price is from its exponentially-weighted moving average over 3, 6, or 12 months. Positive values indicate price is above recent average (momentum); negative values suggest price is below average (potential value opportunity).
+
+**EWMA Volatility % (Annualized)** — Recent annualized volatility using exponential weighting, which gives more weight to recent price movements. Higher values indicate more recent price swings.
+
+**Z-Score (12m, on prices)** — How many standard deviations the current price is from its 12-month mean. Values above +2 suggest potentially overbought; below -2 suggest potentially oversold; near 0 means trading around historical average.
+
+**Correlation to Stocks (12m, monthly)** — How closely each asset moved with your stock allocation over the last 12 months using monthly returns. Values range from -1 (moves opposite) to +1 (moves together). Lower or negative correlation provides better diversification.
+                    """)
             elif results["diag_error"]:
                 st.caption(f"Diagnostics unavailable: {results['diag_error']}")
 
@@ -1400,6 +1768,24 @@ elif page == "rebalance":
                 with m3:
                     st.metric("DE 10Y Real Yield (proxy)", f"{snap.de_10y_real_yield_proxy_pct:.2f}%")
                     st.metric("Global Earnings Yield Est.", f"{snap.global_earnings_yield_est_pct:.2f}%")
+                
+                with st.expander("What do these indicators mean?", expanded=False):
+                    st.markdown("""
+These macro indicators provide context for investment decisions.
+
+**ECB Deposit Rate** — The rate banks earn on overnight deposits at the European Central Bank. Influences borrowing costs and bond yields across Europe. Higher rates typically mean lower bond prices and potentially slower economic growth.
+
+**DE CPI YoY** — German Consumer Price Index year-over-year, a proxy for Eurozone inflation. High inflation erodes purchasing power and may prompt ECB rate hikes. The target is around 2%.
+
+**US 10Y TIPS Yield** — Yield on US inflation-protected Treasury bonds, representing the "real" (after-inflation) return from safe US assets. Higher real yields make stocks relatively less attractive.
+
+**DE 10Y Yield** — Yield on German 10-year government bonds (Bunds), the benchmark "risk-free" rate for European investors. Higher yields mean higher opportunity cost for holding stocks.
+
+**DE 10Y Real Yield (proxy)** — German 10Y yield minus German CPI, estimating the real return on safe European bonds. Negative values mean bonds are losing purchasing power after inflation.
+
+**Global Earnings Yield Est.** — Estimated earnings yield (E/P ratio) for global equities, i.e., the "return" stocks offer from earnings. Compare to bond yields: higher earnings yield suggests stocks are relatively more attractive.
+                    """)
+
 
                 if results["macro_chart_data"]:
                     st.markdown("#### Last 12 months trend")
@@ -1454,14 +1840,14 @@ elif page == "whatif":
     p, _ = portfolio_builder(key="whatif", title="Base portfolio", allow_value=False)
     if p is not None:
         # Load predefined candidate assets
-        whatif_assets_path = os.path.join(CACHE_DIR, "assets", "whatif.json")
+        whatif_assets_path = os.path.join(CACHE_DIR, "assets", "list.json")
         available_candidates: list[dict[str, str]] = []
         try:
             with open(whatif_assets_path, "r", encoding="utf-8") as f:
                 whatif_data = json.load(f)
                 available_candidates = whatif_data.get("Assets", [])
         except Exception as e:
-            st.warning(f"Could not load candidate assets from whatif.json: {e}")
+            st.warning(f"Could not load candidate assets from list.json: {e}")
 
         # Get portfolio tickers to filter out already-included assets
         portfolio_tickers_set = set(getattr(p, "tickers", []))
@@ -1482,9 +1868,11 @@ elif page == "whatif":
         else:
             # Build options for multiselect: display name, store ticker
             candidate_options = {asset["Name"]: asset["Ticker"] for asset in filtered_candidates}
+            # Sort candidate names alphabetically (case-insensitive)
+            sorted_candidate_names = sorted(candidate_options.keys(), key=lambda x: x.lower())
             selected_candidate_names = st.multiselect(
                 "Candidate assets to evaluate",
-                options=list(candidate_options.keys()),
+                options=sorted_candidate_names,
                 default=[],
                 key="whatif_candidates",
                 help="Select one or more assets to analyze for potential inclusion in your portfolio.",
@@ -1548,7 +1936,7 @@ elif page == "whatif":
                     base_target_weights = _target_weights_fraction(p)
 
                     tickers_universe = list(getattr(p, "tickers", [])) + [c for c in candidates if c not in getattr(p, "tickers", [])]
-                    prices_universe = Portfolio.download_prices(tickers_universe)
+                    prices_universe = _cached_download_prices(tuple(sorted(tickers_universe)))
 
                     portfolio_tickers = list(getattr(p, "tickers", []))
                     candidate_cols = [c for c in candidates if c in prices_universe.columns]
@@ -1592,9 +1980,25 @@ elif page == "whatif":
                         scores_display = scores.copy()
                         scores_display.index = [candidate_name_map.get(t, t) for t in scores_display.index]
                         pct_cols = ["delta_vol_if_swap", "delta_max_drawdown_if_swap", "cand_vol_ann"]
+                        
+                        # Transform max_abs_corr_offender: "TICKER (+0.XXX)" -> "Asset Name"
+                        def _offender_to_name(val: str) -> str:
+                            if not val or not isinstance(val, str):
+                                return "—"
+                            # Extract ticker (everything before " (")
+                            if " (" in val:
+                                ticker = val.split(" (")[0].strip()
+                            else:
+                                ticker = val.strip()
+                            # Look up asset name
+                            return assets_map.get(ticker, ticker)
+                        
+                        if "max_abs_corr_offender" in scores_display.columns:
+                            scores_display["max_abs_corr_offender"] = scores_display["max_abs_corr_offender"].apply(_offender_to_name)
+                        
                         for col in scores_display.columns:
                             if col == "max_abs_corr_offender":
-                                continue
+                                continue  # Already processed above
                             elif col == "n_months_used":
                                 scores_display[col] = scores_display[col].apply(lambda x: f"{int(x)}" if pd.notna(x) else "—")
                             elif col in pct_cols:
@@ -1761,29 +2165,54 @@ elif page == "whatif":
             if results["scores_transposed"] is not None:
                 st.markdown("### Diversification analysis")
                 st.dataframe(results["scores_transposed"], use_container_width=True)
+                
+                with st.expander("What do these metrics mean?", expanded=False):
+                    st.markdown("""
+This table shows how each candidate asset relates to your existing portfolio.
+
+**Avg |Corr| to Assets** — Mean absolute correlation to each portfolio asset. Lower is better for diversification: below 0.3 is excellent, 0.3-0.5 is moderate, above 0.5 provides limited benefit.
+
+**Max |Corr| to Assets** — Highest absolute correlation to any single portfolio asset. Lower is better; values above 0.7 indicate redundancy with an existing holding.
+
+**Highest Corr Asset** — The portfolio asset with which the candidate is most correlated, helping identify potential overlaps.
+
+**Weighted Avg |Corr|** — Correlation weighted by portfolio asset weights. Lower is better. More relevant than unweighted average because it accounts for position sizes.
+
+**Corr to Portfolio** — Correlation to overall portfolio returns. Lower is better for diversification: below 0.3 indicates a strong diversifier, above 0.6 means it moves with the portfolio.
+
+**Δ Volatility (swap)** — Change in portfolio volatility if the swap is made. Negative is better as it indicates reduced portfolio risk.
+
+**Δ |Max Drawdown| (swap)** — Change in worst-case drawdown magnitude. Negative is better as it indicates smaller potential losses.
+
+**Candidate Vol (ann.)** — The candidate's own annualized volatility. Note that high-volatility assets can still be good diversifiers if they're uncorrelated with your portfolio.
+
+**Months of Data** — Analysis period length. More months of data generally means more reliable results.
+                    """)
 
             # RRR Analysis
             st.markdown("### Return-to-Risk Ratio (RRR) analysis")
-            with st.expander("What is RRR analysis?", expanded=False):
-                st.markdown("""
-**RRR (Return-to-Risk Ratio)** analysis is based on the "Portfolio Intuition" paper (Kennedy, 2018).
-
-**Key concepts:**
-- **RRR** = Annualized Return / Annualized Volatility (similar to Sharpe, but without subtracting the risk-free rate)
-- **RRR_p**: The RRR of your current portfolio
-- **RRR_a**: The RRR of the candidate asset
-- **rho**: Correlation between the candidate and portfolio returns
-
-**The "bare minimum no-harm" condition:**
-For adding a new asset to not hurt the portfolio (as weight approaches 0): **RRR_a > rho x RRR_p**
-
-If the margin (RRR_a - rho x RRR_p) is positive, the asset passes this hurdle.
-
-**RRR_pa**: The combined portfolio RRR after allocating the specified swap weight to the candidate. If RRR_pa > RRR_p, adding the asset improves the portfolio's risk-adjusted returns.
-                """)
 
             if results["rrr_transposed"] is not None:
                 st.dataframe(results["rrr_transposed"], use_container_width=True)
+                
+                with st.expander("What is RRR analysis?", expanded=False):
+                    st.markdown("""
+**RRR (Return-to-Risk Ratio)** analysis is based on the "Portfolio Intuition" paper (Kennedy, 2018).
+
+**RRR** is calculated as Annualized Return / Annualized Volatility, similar to the Sharpe ratio but without subtracting the risk-free rate. **RRR_p** refers to your current portfolio's RRR, while **RRR_a** is the candidate asset's RRR. **rho** represents the correlation between candidate and portfolio returns.
+
+**The "bare minimum no-harm" condition** states that for adding a new asset to not hurt the portfolio (as weight approaches 0), **RRR_a > rho × RRR_p** must hold. If the margin (RRR_a - rho × RRR_p) is positive, the asset passes this hurdle.
+
+**Hurdle (ρ × RRR_p)** — The minimum RRR the asset must exceed to be beneficial.
+
+**Margin (RRR_a - Hurdle)** — Positive means PASS (asset clears the hurdle); negative means FAIL.
+
+**Combined RRR** — The portfolio's RRR after allocating the specified swap weight to the candidate. If Combined RRR > Portfolio RRR, adding the asset improves risk-adjusted returns.
+
+**Δ RRR vs Portfolio** — The change in RRR. Positive values indicate improvement.
+
+**Status** — PASS indicates the asset improves risk-adjusted returns; FAIL suggests it may hurt the portfolio.
+                    """)
             elif results["rrr_error"]:
                 st.caption(f"RRR analysis unavailable: {results['rrr_error']}")
             else:
@@ -1793,6 +2222,25 @@ If the margin (RRR_a - rho x RRR_p) is positive, the asset passes this hurdle.
             if results["backtest_df"] is not None:
                 st.markdown("### Backtest comparison")
                 st.dataframe(results["backtest_df"], use_container_width=True)
+                
+                with st.expander("What do these metrics mean?", expanded=False):
+                    st.markdown("""
+This table compares historical performance between your baseline portfolio and portfolios with each candidate asset added.
+
+**Total Return (%)** — Cumulative gain/loss over the entire analysis period.
+
+**CAGR (%)** — Compound Annual Growth Rate, the average annual return assuming reinvestment. Higher is better for comparing across different time periods.
+
+**Volatility (%)** — Annualized standard deviation of returns. Lower generally indicates more stable returns, though this is a trade-off with potential returns.
+
+**Max Drawdown (%)** — The largest peak-to-trough decline during the period. Less negative values indicate smaller worst-case losses.
+
+**Sharpe** — Risk-adjusted return calculated as (Return - Risk-free) / Volatility. Higher is better: above 0.5 is decent, above 1.0 is good.
+
+**Sortino** — Similar to Sharpe but only penalizes downside volatility. Higher is better, especially relevant for loss-averse investors.
+
+*Note: Past performance does not guarantee future results. Use backtests as one input among many considerations.*
+                    """)
 
             # AI-Assisted Analysis section (combined prompt + query)
             if results["llm_prompt"]:

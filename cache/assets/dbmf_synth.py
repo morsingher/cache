@@ -6,73 +6,92 @@ def reconstruct_european_history(us_ticker, eu_ticker, currency_pair="EURUSD=X")
     
     # 1. Fetch Data
     tickers = [us_ticker, eu_ticker, currency_pair]
-    data = yf.download(tickers, period="max", auto_adjust=True, progress=False)['Close']
+    # Download full data
+    raw_data = yf.download(tickers, period="max", auto_adjust=True, progress=False)
     
-    # 2. Clean Data (Drop rows where US data is missing)
-    # We only care about days where the US market was open
-    df = data.dropna(subset=[us_ticker]).copy()
-    
-    # Forward fill missing FX rates (e.g., US market open but FX data gap)
-    df[currency_pair] = df[currency_pair].ffill()
+    # 2. Robust Column Flattening
+    # This block handles all variations of yfinance return structures (MultiIndex or Flat)
+    if isinstance(raw_data.columns, pd.MultiIndex):
+        # Check if 'Close' is a top-level key (standard in recent yfinance)
+        if 'Close' in raw_data.columns.get_level_values(0):
+            df = raw_data['Close'].copy()
+        else:
+            # Fallback: Try to extract Close if it's in the second level
+            try:
+                df = raw_data.xs('Close', axis=1, level=1, drop_level=True).copy()
+            except KeyError:
+                # Last resort: just take the whole thing if structure is weird
+                df = raw_data.copy()
+    else:
+        # If it's already flat (e.g. single ticker download sometimes), just ensure we have Close
+        if 'Close' in raw_data.columns:
+            df = raw_data['Close'].copy()
+        else:
+            df = raw_data.copy()
 
-    # 3. Calculate Unscaled Synthetic EUR Price
-    # Formula: USD_Price / (USD_per_EUR) = EUR_Price
+    # FORCE columns to be simple strings (removing any remaining MultiIndex levels or names)
+    # This explicitly resolves the "2 levels on left, 1 on right" error.
+    df.columns = [str(c[1]) if isinstance(c, tuple) else str(c) for c in df.columns]
+    
+    # Clean up column names to ensure they match our inputs (remove accidental whitespace)
+    df.columns = df.columns.str.strip()
+    
+    # Ensure index is datetime and sorted
+    df.index = pd.to_datetime(df.index)
+    df = df.sort_index()
+
+    # 3. Clean Data
+    # Drop rows where US data is missing (market closed)
+    df = df.dropna(subset=[us_ticker]).copy()
+    
+    # Forward fill missing FX rates
+    if currency_pair in df.columns:
+        df[currency_pair] = df[currency_pair].ffill()
+    else:
+        raise ValueError(f"Currency pair {currency_pair} not found in downloaded data.")
+
+    # 4. Calculate Unscaled Synthetic EUR Price
     df['Synthetic_Raw'] = df[us_ticker] / df[currency_pair]
     
-    # 4. Calculate Scaling Factor (The "Stitch")
-    # Find the first date where we have REAL European data
+    # 5. Calculate Scaling Factor (The "Stitch")
     first_eu_date = df[eu_ticker].first_valid_index()
     
     if first_eu_date is None:
         raise ValueError("No European data found to stitch against.")
         
-    # Get the prices on that specific "Link Date"
     real_price_at_link = df.loc[first_eu_date, eu_ticker]
     synth_price_at_link = df.loc[first_eu_date, 'Synthetic_Raw']
     
-    # Scaling Factor: How much do we need to multiply the synthetic data 
-    # to make it match the real data on day 1?
     scaling_factor = real_price_at_link / synth_price_at_link
     
-    # 5. Apply Scaling to create final Synthetic History
+    # 6. Apply Scaling
     df['Synthetic_History'] = df['Synthetic_Raw'] * scaling_factor
     
-    # 6. Combine: Use Real data where available, otherwise use Synthetic
-    # We create a new column 'Combined'
-    df['Combined_History'] = df[eu_ticker].combine_first(df['Synthetic_History'])
+    # 7. Combine
+    # Explicitly casting to Series ensures merge compatibility
+    real_series = df[eu_ticker]
+    synth_series = df['Synthetic_History']
+    
+    df['Combined_History'] = real_series.combine_first(synth_series)
     
     return df
 
 if __name__ == "__main__":
-    # --- Execution / Demo Plot ---
     try:
-        # tickers
-        us_etf = "DBMF"       # The Proxy (US History)
-        eu_etf = "DBMFE.PA"   # The Target (European History)
-
+        us_etf = "DBMF"
+        eu_etf = "DBMFE.PA"
+        
+        print("Fetching and reconstructing...")
         df = reconstruct_european_history(us_etf, eu_etf)
+        print("Success!")
+        print(df[['Combined_History']].tail())
 
         # --- Visualization ---
         plt.figure(figsize=(12, 6))
-
-        # Plot the Synthetic part (older data)
-        plt.plot(
-            df.index,
-            df['Synthetic_History'],
-            label='Synthetic Backfill (USD converted to EUR)',
-            color='gray',
-            linestyle='--',
-            alpha=0.6
-        )
-
-        # Plot the Real part (newer data)
-        # We re-plot the EU ticker on top to show the seamless join
-        plt.plot(df.index, df[eu_etf], label=f'Actual {eu_etf}', color='#0052cc', linewidth=2)
-
-        plt.title(f"Reconstructed History: {eu_etf} (via {us_etf})", fontsize=14)
-        plt.ylabel("Price (€)")
+        plt.plot(df.index, df['Synthetic_History'], label='Synthetic', color='gray', linestyle='--', alpha=0.6)
+        plt.plot(df.index, df[eu_etf], label='Actual', color='#0052cc', linewidth=2)
+        plt.title(f"Reconstructed: {eu_etf}")
         plt.legend()
-        plt.grid(True, alpha=0.3)
         plt.show()
 
     except Exception as e:

@@ -4,14 +4,15 @@
     {
       "Name": "Stocks",
       "Ticker": "ACWE.MI",
-      "Weight": 60.0,
+      "Weight": 65.0,
       "Target": 60.0
     },
     {
       "Name": "Bonds",
       "Ticker": "AGGH.MI",
-      "Weight": 40.0,
+      "Weight": 35.0,
       "Target": 40.0
     }
-  ]
+  ],
+  "Value": 10000.00
 }

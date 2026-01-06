@@ -247,12 +247,36 @@ def compute_rebalancing_diagnostics(
     log_returns = np.log(prices_lookback).diff()
 
     # Identify stocks benchmark from asset names
+    # Default stocks ticker to use when portfolio has no stocks
+    DEFAULT_STOCKS_TICKER = "ACWE.MI"
+    
     assets_map = getattr(portfolio, "assets", {})
     tickers = list(prices_lookback.columns)
     stock_tickers = [t for t in tickers if str(assets_map.get(t, "")).lower() == "stocks"]
     stocks_lr = None
+    external_stocks_prices = None
+    
     if stock_tickers:
         stocks_lr = log_returns[stock_tickers].mean(axis=1)
+    else:
+        # Download external stocks data for correlation computation
+        try:
+            external_stocks_prices = yf.download(
+                DEFAULT_STOCKS_TICKER,
+                period="max",
+                auto_adjust=True,
+                progress=False,
+            )
+            if isinstance(external_stocks_prices.columns, pd.MultiIndex):
+                external_stocks_prices = external_stocks_prices["Close"]
+                if isinstance(external_stocks_prices, pd.DataFrame):
+                    external_stocks_prices = external_stocks_prices.iloc[:, 0]
+            elif "Close" in external_stocks_prices.columns:
+                external_stocks_prices = external_stocks_prices["Close"]
+            else:
+                external_stocks_prices = external_stocks_prices.iloc[:, 0] if len(external_stocks_prices.columns) > 0 else None
+        except Exception:
+            external_stocks_prices = None
 
     # Current price (last available for each ticker within lookback)
     current_price = pd.Series(
@@ -281,20 +305,42 @@ def compute_rebalancing_diagnostics(
 
     # 12m correlation vs stocks on MONTHLY log returns (more stable than daily).
     corr_12m_monthly = pd.Series(index=tickers, dtype=float)
+    stocks_bench_m = None
+    use_external_stocks = False
+    
     if stock_tickers:
+        # Use portfolio's stocks for benchmark
         monthly_prices = prices_lookback.resample("ME").last().dropna(how="any")
         if monthly_prices.shape[0] >= 13:
             r_m = np.log(monthly_prices / monthly_prices.shift(1)).dropna(how="any")
             stocks_bench_m = r_m[stock_tickers].mean(axis=1)
-            # last 12 monthly observations
-            r_m = r_m.tail(12)
-            stocks_bench_m = stocks_bench_m.reindex(r_m.index)
-            for t in tickers:
-                if str(assets_map.get(t, "")).lower() == "stocks":
-                    corr_12m_monthly[t] = 1.0
-                    continue
-                pair = pd.DataFrame({"Stocks": stocks_bench_m, "X": r_m[t]}).dropna()
-                corr_12m_monthly[t] = float(pair["Stocks"].corr(pair["X"])) if pair.shape[0] >= 2 else np.nan
+    elif external_stocks_prices is not None:
+        # Use external stocks for benchmark
+        use_external_stocks = True
+        try:
+            # Get external stocks prices aligned with portfolio date range
+            ext_prices = external_stocks_prices.reindex(prices_lookback.index).ffill().bfill()
+            monthly_ext = ext_prices.resample("ME").last().dropna()
+            monthly_prices = prices_lookback.resample("ME").last().dropna(how="any")
+            if monthly_ext.shape[0] >= 13 and monthly_prices.shape[0] >= 13:
+                r_m = np.log(monthly_prices / monthly_prices.shift(1)).dropna(how="any")
+                r_ext = np.log(monthly_ext / monthly_ext.shift(1)).dropna()
+                stocks_bench_m = r_ext.reindex(r_m.index)
+        except Exception:
+            stocks_bench_m = None
+    
+    if stocks_bench_m is not None:
+        # last 12 monthly observations
+        r_m = r_m.tail(12)
+        stocks_bench_m = stocks_bench_m.reindex(r_m.index)
+        for t in tickers:
+            if not use_external_stocks and str(assets_map.get(t, "")).lower() == "stocks":
+                corr_12m_monthly[t] = 1.0
+                continue
+            if t not in r_m.columns:
+                continue
+            pair = pd.DataFrame({"Stocks": stocks_bench_m, "X": r_m[t]}).dropna()
+            corr_12m_monthly[t] = float(pair["Stocks"].corr(pair["X"])) if pair.shape[0] >= 2 else np.nan
 
     # 12m CAGR per asset (using actual available dates within the last ~365 days)
     cagr_12m = pd.Series(index=tickers, dtype=float)
@@ -318,7 +364,8 @@ def compute_rebalancing_diagnostics(
     table["EWMA Price Distance % (12m)"] = [((current_price[t] / float(ewma_price_df.loc[t, "12m"])) - 1.0) * 100.0 if pd.notna(current_price[t]) and pd.notna(ewma_price_df.loc[t, "12m"]) else np.nan for t in tickers]
     table["EWMA Volatility % (Annualized)"] = [float(ewma_vol[t]) * np.sqrt(float(trading_days_per_year)) * 100.0 if pd.notna(ewma_vol[t]) else np.nan for t in tickers]
     table["Z-Score (12m, on prices)"] = [float(zscore[t]) for t in tickers]
-    if stock_tickers:
+    # Add correlation to stocks if computed (from portfolio stocks or external stocks)
+    if stocks_bench_m is not None:
         table["Correlation to Stocks (12m, monthly)"] = [float(corr_12m_monthly[t]) for t in tickers]
 
     table.index.name = None

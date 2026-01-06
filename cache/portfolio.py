@@ -123,7 +123,26 @@ class Portfolio:
                 # If stitching fails, fall back to normal yf download.
                 dbmf_series = None
 
-        tickers_to_download = [t for t in tickers if t != "DBMF"] if dbmf_series is not None else tickers
+        # Optional ZPRVX synthetic series (70% ZPRV.DE + 30% ZPRX.DE).
+        zprvx_series = None
+        if "ZPRVX" in tickers:
+            try:
+                try:
+                    from assets.zprvx_synth import get_zprvx_series  # type: ignore
+                except Exception:
+                    from cache.assets.zprvx_synth import get_zprvx_series  # type: ignore
+
+                zprvx_series = get_zprvx_series()
+            except Exception:
+                # If synthesis fails, fall back to normal yf download (will likely fail).
+                zprvx_series = None
+
+        # Build list of tickers to download from yfinance (exclude synthetic ones)
+        tickers_to_download = tickers.copy()
+        if dbmf_series is not None and "DBMF" in tickers_to_download:
+            tickers_to_download = [t for t in tickers_to_download if t != "DBMF"]
+        if zprvx_series is not None and "ZPRVX" in tickers_to_download:
+            tickers_to_download = [t for t in tickers_to_download if t != "ZPRVX"]
 
         raw = None
         if tickers_to_download:
@@ -141,11 +160,30 @@ class Portfolio:
         elif len(tickers_to_download) > 1:
             prices = raw["Close"]
         else:
+            # Single ticker case: yfinance may return a MultiIndex DataFrame.
+            # We need to flatten it to a single-level column structure before joining.
             only = tickers_to_download[0]
-            prices = raw[["Close"]].rename(columns={"Close": only})
+            if isinstance(raw.columns, pd.MultiIndex):
+                # Extract the Close prices - may be Series or DataFrame depending on yfinance version
+                close_data = raw["Close"]
+                if isinstance(close_data, pd.Series):
+                    prices = close_data.to_frame(name=only)
+                else:
+                    # It's a DataFrame, flatten columns and rename
+                    prices = close_data.copy()
+                    prices.columns = [only]
+            else:
+                prices = raw[["Close"]].rename(columns={"Close": only})
+
+        # Ensure prices has a flat column structure before joining synthetic series
+        if isinstance(prices.columns, pd.MultiIndex):
+            prices.columns = prices.columns.get_level_values(-1)
 
         if dbmf_series is not None:
             prices = prices.join(dbmf_series, how="outer")
+
+        if zprvx_series is not None:
+            prices = prices.join(zprvx_series, how="outer")
 
         # Keep columns in requested order (and drop extras).
         prices = prices.reindex(columns=tickers)
@@ -651,20 +689,42 @@ class Portfolio:
         Rolling correlation (monthly, window=window_months) between each asset and a 'stocks' benchmark.
         Stocks benchmark is built as an equal-weighted average of monthly log returns of tickers
         whose asset class is 'stocks' (case-insensitive).
+        
+        If no stocks are in the portfolio, downloads external stocks data (ACWE.MI) for comparison.
 
         Returns:
           DataFrame indexed by month-end dates, columns=tickers (non-stocks only by default).
         """
+        # Default stocks ticker to use when portfolio has no stocks
+        DEFAULT_STOCKS_TICKER = "ACWE.MI"
+        
         r_m = self._monthly_log_returns(debug=debug)
         stock_tickers = [t for t in self.tickers if self.assets.get(t, "").lower() == "stocks"]
+        
         if not stock_tickers:
-            raise ValueError("No tickers marked as 'stocks' in --assets; cannot compute rolling correlation vs stocks.")
-
-        stocks_benchmark = r_m[stock_tickers].mean(axis=1)
+            # No stocks in portfolio - download external stocks data
+            try:
+                stocks_prices = Portfolio.download_prices([DEFAULT_STOCKS_TICKER])
+                if stocks_prices.empty or DEFAULT_STOCKS_TICKER not in stocks_prices.columns:
+                    return pd.DataFrame()
+                # Compute monthly returns for external stocks
+                stocks_d = Portfolio.fill_non_trading_days(stocks_prices, freq="D")
+                stocks_me = Portfolio.resample_prices(stocks_d, freq="ME")
+                stocks_returns = Portfolio.compute_returns(stocks_me, method="log")
+                stocks_benchmark = stocks_returns[DEFAULT_STOCKS_TICKER].dropna()
+                # Align with portfolio returns index
+                stocks_benchmark = stocks_benchmark.reindex(r_m.index)
+                # All portfolio assets should be correlated vs stocks
+                non_stock_tickers = list(self.tickers)
+            except Exception:
+                return pd.DataFrame()
+        else:
+            stocks_benchmark = r_m[stock_tickers].mean(axis=1)
+            non_stock_tickers = [t for t in self.tickers if t not in stock_tickers]
 
         out: dict[str, pd.Series] = {}
-        for t in self.tickers:
-            if t in stock_tickers:
+        for t in non_stock_tickers:
+            if t not in r_m.columns:
                 continue
             out[self._label(t)] = r_m[t].rolling(window_months).corr(stocks_benchmark)
 
