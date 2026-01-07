@@ -113,8 +113,8 @@ st.markdown(
 def _rf_annual_controls(*, key_prefix: str, default_series: str = "ECBDFR") -> float:
     mode = st.radio(
         "Risk-free rate",
-        options=["Manual", "Federal Reserve Economic Data (FRED)"],
-        index=1,
+        options=["Federal Reserve Economic Data (FRED)", "Manual"],
+        index=0,
         horizontal=True,
         key=f"{key_prefix}_rf_mode",
         help="Used for Sharpe/Sortino in analysis + comparisons/backtests.",
@@ -255,9 +255,9 @@ def _portfolio_json_from_manual(
 ) -> dict[str, Any]:
     assets: list[dict[str, Any]] = []
     for _, row in df.iterrows():
-        weight = float(row["Weight (%)"])
+        weight = round(float(row["Weight (%)"]), 2)
         # If Target (%) column exists, use it; otherwise use Weight (%) as target
-        target = float(row["Target (%)"]) if "Target (%)" in row.index else weight
+        target = round(float(row["Target (%)"]), 2) if "Target (%)" in row.index else weight
         assets.append(
             {
                 "Name": str(row["Asset Name"]).strip(),
@@ -268,7 +268,7 @@ def _portfolio_json_from_manual(
         )
     obj: dict[str, Any] = {"Name": str(portfolio_name).strip() or "Portfolio", "Assets": assets}
     # Default to 100k EUR if value not specified
-    obj["Value"] = float(value_eur) if value_eur is not None else 100_000.0
+    obj["Value"] = round(float(value_eur), 2) if value_eur is not None else 100_000.0
     return obj
 
 
@@ -401,8 +401,6 @@ def portfolio_builder(
         if allow_value:
             value_eur = st.number_input("Current value (EUR)", min_value=0.0, value=80_000.0, step=1_000.0, key=f"{key}_value")
 
-    # st.caption("Tip: for what-if, at least one row's **Asset** should be `Stocks`.")
-
     # Load available assets for dropdown
     asset_options, asset_mapping = _get_asset_options()
     if not asset_options:
@@ -424,9 +422,10 @@ def portfolio_builder(
     if not default_bonds and len(asset_options) > 1:
         default_bonds = asset_options[1] if asset_options[1] != default_stocks else (asset_options[0] if asset_options[0] != default_stocks else "")
     
-    # For rebalancing (allow_value=True), show both Weight and Target columns
-    # For other sections, show only Weight column (Target = Weight automatically)
+    # For rebalancing (allow_value=True), use table with both Weight and Target columns
+    # For other sections, use slider-based UI with auto-normalization
     if allow_value:
+        # === TABLE-BASED UI FOR REBALANCING ===
         default = pd.DataFrame(
             [
                 {"Asset": default_stocks, "Weight (%)": 60.0, "Target (%)": 60.0},
@@ -443,52 +442,32 @@ def portfolio_builder(
             "Weight (%)": st.column_config.NumberColumn(required=True, min_value=0.0, help="Current allocation"),
             "Target (%)": st.column_config.NumberColumn(required=True, min_value=0.0, help="Target allocation"),
         }
-    else:
-        default = pd.DataFrame(
-            [
-                {"Asset": default_stocks, "Weight (%)": 60.0},
-                {"Asset": default_bonds, "Weight (%)": 40.0},
-            ]
+        
+        edited_df = st.data_editor(
+            default,
+            num_rows="dynamic",
+            use_container_width=True,
+            key=f"{key}_editor",
+            column_config=column_config,
         )
-        column_config = {
-            "Asset": st.column_config.SelectboxColumn(
-                "Asset",
-                options=asset_options,
-                required=True,
-                help="Select an asset from the available list",
-            ),
-            "Weight (%)": st.column_config.NumberColumn(required=True, min_value=0.0),
-        }
-    
-    edited_df = st.data_editor(
-        default,
-        num_rows="dynamic",
-        use_container_width=True,
-        key=f"{key}_editor",
-        column_config=column_config,
-    )
-    
-    # Convert to records and back to completely flatten any MultiIndex structure
-    # This avoids "Not allowed to merge between different levels" errors from st.data_editor
-    df = pd.DataFrame(edited_df.to_dict("records"))
-    
-    # Parse asset selections to extract Name and Ticker
-    asset_names = []
-    tickers = []
-    for x in df["Asset"].tolist():
-        if pd.notna(x) and x and x in asset_mapping:
-            name, ticker = asset_mapping[x]
-            asset_names.append(name)
-            tickers.append(ticker)
-        else:
-            asset_names.append("")
-            tickers.append("")
-    df["Asset Name"] = asset_names
-    df["Ticker"] = tickers
-
-    if allow_value:
+        
+        df = pd.DataFrame(edited_df.to_dict("records"))
+        
+        # Parse asset selections to extract Name and Ticker
+        asset_names = []
+        tickers = []
+        for x in df["Asset"].tolist():
+            if pd.notna(x) and x and x in asset_mapping:
+                name, ticker = asset_mapping[x]
+                asset_names.append(name)
+                tickers.append(ticker)
+            else:
+                asset_names.append("")
+                tickers.append("")
+        df["Asset Name"] = asset_names
+        df["Ticker"] = tickers
+        
         normalize = st.checkbox("Auto-normalize weights to sum to 100", value=True, key=f"{key}_normalize")
-        # Show sums for both Weight and Target
         try:
             w_sum = float(pd.to_numeric(df["Weight (%)"], errors="coerce").sum())
             t_sum = float(pd.to_numeric(df["Target (%)"], errors="coerce").sum())
@@ -496,13 +475,113 @@ def portfolio_builder(
         except Exception:
             pass
     else:
-        normalize = st.checkbox("Auto-normalize weights to sum to 100", value=True, key=f"{key}_normalize")
-        # Show sum for Weight only
-        try:
-            w_sum = float(pd.to_numeric(df["Weight (%)"], errors="coerce").sum())
-            st.caption(f"Weights sum: {w_sum:.3f}")
-        except Exception:
-            pass
+        # === SLIDER-BASED UI FOR ANALYZE/COMPARE/WHATIF ===
+        # Initialize session state for this portfolio builder
+        weights_key = f"{key}_slider_weights"
+        if weights_key not in st.session_state:
+            st.session_state[weights_key] = {default_stocks: 60.0, default_bonds: 40.0}
+        
+        # Asset multiselect
+        current_selection = list(st.session_state[weights_key].keys())
+        # Ensure current selection only contains valid options
+        current_selection = [a for a in current_selection if a in asset_options]
+        if not current_selection:
+            current_selection = [default_stocks, default_bonds]
+        
+        selected_assets = st.multiselect(
+            "Select assets",
+            options=asset_options,
+            default=current_selection,
+            key=f"{key}_asset_select",
+        )
+        
+        if not selected_assets:
+            st.warning("Please select at least one asset.")
+            return None, None
+        
+        # Update weights for newly added assets (give them equal share of remaining)
+        current_weights = st.session_state[weights_key]
+        for asset in selected_assets:
+            if asset not in current_weights:
+                # New asset: give it a default weight
+                current_weights[asset] = 10.0
+        
+        # Remove weights for deselected assets
+        current_weights = {k: v for k, v in current_weights.items() if k in selected_assets}
+        st.session_state[weights_key] = current_weights
+        
+        # Display sliders for each asset
+        raw_weights: dict[str, float] = {}
+        
+        for asset in selected_assets:
+            # Extract just the asset name (before the ticker in parentheses) for compact display
+            asset_short = asset.split(" (")[0] if " (" in asset else asset
+            # Create a safe key from the asset name (remove special chars)
+            safe_key = "".join(c if c.isalnum() else "_" for c in asset)
+            
+            col_name, col_slider = st.columns([2.5, 6.5])
+            
+            with col_name:
+                st.markdown(f"**{asset_short}**")
+            
+            with col_slider:
+                # Use session state value as default
+                default_val = float(current_weights.get(asset, 10.0))
+                weight = st.slider(
+                    f"Weight for {asset_short}",
+                    min_value=0.0,
+                    max_value=100.0,
+                    value=default_val,
+                    step=1.0,
+                    key=f"{key}_slider_{safe_key}",
+                    label_visibility="collapsed",
+                )
+                raw_weights[asset] = weight
+        
+        # Update session state with new weights
+        st.session_state[weights_key] = raw_weights
+        
+        # Compute normalized weights
+        total_raw = sum(raw_weights.values())
+        if total_raw <= 0:
+            st.warning("Total weight must be greater than 0.")
+            return None, None
+        
+        # Normalize weights to sum to 100 (round to 2 decimals)
+        normalized_weights = {k: round(v / total_raw * 100.0, 2) for k, v in raw_weights.items()}
+        
+        # Check if normalization was needed (sum != 100)
+        if abs(total_raw - 100.0) > 0.5:
+            # Show warning with before → after for each asset
+            change_lines = []
+            for asset in selected_assets:
+                asset_short = asset.split(" (")[0] if " (" in asset else asset
+                change_lines.append(f"- {asset_short}: {raw_weights[asset]:.0f}% → {normalized_weights[asset]:.1f}%")
+            st.warning(
+                f"⚠️ Weights sum to **{total_raw:.0f}%** (not 100%). Normalizing automatically.\n\n"
+                + "\n".join(change_lines)
+            )
+        else:
+            # Display compact allocation summary (no normalization needed)
+            alloc_parts = []
+            for asset in selected_assets:
+                asset_short = asset.split(" (")[0] if " (" in asset else asset
+                alloc_parts.append(f"{asset_short}: **{normalized_weights[asset]:.1f}%**")
+            st.caption(" · ".join(alloc_parts))
+        
+        rows = []
+        for asset in selected_assets:
+            if asset in asset_mapping:
+                name, ticker = asset_mapping[asset]
+                rows.append({
+                    "Asset": asset,
+                    "Asset Name": name,
+                    "Ticker": ticker,
+                    "Weight (%)": normalized_weights[asset],
+                })
+        
+        df = pd.DataFrame(rows)
+        normalize = True  # Always normalize in slider mode
 
     try:
         built_json_obj = _portfolio_json_from_manual(portfolio_name=portfolio_name, df=df, value_eur=value_eur if allow_value else None)
@@ -540,15 +619,12 @@ def _manual_portfolio_builder(
 ) -> Portfolio | None:
     """
     Simplified portfolio builder that only allows manual entry (no JSON options).
-    Uses a single Weight column (Target = Weight automatically).
+    Uses slider-based UI with auto-normalization to 100%.
     """
     if title:
         st.subheader(title)
 
-    col1, col2 = st.columns([2, 1])
-    with col1:
-        portfolio_name = st.text_input("Portfolio name", value="My Portfolio", key=f"{key}_name")
-    col2.empty()
+    portfolio_name = st.text_input("Portfolio name", value="My Portfolio", key=f"{key}_name")
 
     # Load available assets for dropdown
     asset_options, asset_mapping = _get_asset_options()
@@ -571,60 +647,116 @@ def _manual_portfolio_builder(
     if not default_bonds and len(asset_options) > 1:
         default_bonds = asset_options[1] if asset_options[1] != default_stocks else (asset_options[0] if asset_options[0] != default_stocks else "")
     
-    default = pd.DataFrame(
-        [
-            {"Asset": default_stocks, "Weight (%)": 60.0},
-            {"Asset": default_bonds, "Weight (%)": 40.0},
-        ]
-    )
-    edited_df = st.data_editor(
-        default,
-        num_rows="dynamic",
-        use_container_width=True,
-        key=f"{key}_editor",
-        column_config={
-            "Asset": st.column_config.SelectboxColumn(
-                "Asset",
-                options=asset_options,
-                required=True,
-                help="Select an asset from the available list",
-            ),
-            "Weight (%)": st.column_config.NumberColumn(required=True, min_value=0.0),
-        },
+    # === SLIDER-BASED UI ===
+    # Initialize session state for this portfolio builder
+    weights_key = f"{key}_slider_weights"
+    if weights_key not in st.session_state:
+        st.session_state[weights_key] = {default_stocks: 60.0, default_bonds: 40.0}
+    
+    # Asset multiselect
+    current_selection = list(st.session_state[weights_key].keys())
+    # Ensure current selection only contains valid options
+    current_selection = [a for a in current_selection if a in asset_options]
+    if not current_selection:
+        current_selection = [default_stocks, default_bonds]
+    
+    selected_assets = st.multiselect(
+        "Select assets",
+        options=asset_options,
+        default=current_selection,
+        key=f"{key}_asset_select",
     )
     
-    # Convert to records and back to completely flatten any MultiIndex structure
-    # This avoids "Not allowed to merge between different levels" errors from st.data_editor
-    df = pd.DataFrame(edited_df.to_dict("records"))
+    if not selected_assets:
+        st.warning("Please select at least one asset.")
+        return None
     
-    # Parse asset selections to extract Name and Ticker
-    asset_names = []
-    tickers = []
-    for x in df["Asset"].tolist():
-        if pd.notna(x) and x and x in asset_mapping:
-            name, ticker = asset_mapping[x]
-            asset_names.append(name)
-            tickers.append(ticker)
-        else:
-            asset_names.append("")
-            tickers.append("")
-    df["Asset Name"] = asset_names
-    df["Ticker"] = tickers
-
-    normalize = st.checkbox("Auto-normalize weights to sum to 100", value=True, key=f"{key}_normalize")
-
-    try:
-        w_sum = float(pd.to_numeric(df["Weight (%)"], errors="coerce").sum())
-        st.caption(f"Weights sum: {w_sum:.3f}")
-    except Exception:
-        pass
+    # Update weights for newly added assets
+    current_weights = st.session_state[weights_key]
+    for asset in selected_assets:
+        if asset not in current_weights:
+            current_weights[asset] = 10.0
+    
+    # Remove weights for deselected assets
+    current_weights = {k: v for k, v in current_weights.items() if k in selected_assets}
+    st.session_state[weights_key] = current_weights
+    
+    # Display sliders for each asset
+    raw_weights: dict[str, float] = {}
+    
+    for asset in selected_assets:
+        asset_short = asset.split(" (")[0] if " (" in asset else asset
+        # Create a safe key from the asset name (remove special chars)
+        safe_key = "".join(c if c.isalnum() else "_" for c in asset)
+        
+        col_name, col_slider = st.columns([2.5, 6.5])
+        
+        with col_name:
+            st.markdown(f"**{asset_short}**")
+        
+        with col_slider:
+            default_val = float(current_weights.get(asset, 10.0))
+            weight = st.slider(
+                f"Weight for {asset_short}",
+                min_value=0.0,
+                max_value=100.0,
+                value=default_val,
+                step=1.0,
+                key=f"{key}_slider_{safe_key}",
+                label_visibility="collapsed",
+            )
+            raw_weights[asset] = weight
+    
+    # Update session state
+    st.session_state[weights_key] = raw_weights
+    
+    # Compute normalized weights
+    total_raw = sum(raw_weights.values())
+    if total_raw <= 0:
+        st.warning("Total weight must be greater than 0.")
+        return None
+    
+    # Normalize weights to sum to 100 (round to 2 decimals)
+    normalized_weights = {k: round(v / total_raw * 100.0, 2) for k, v in raw_weights.items()}
+    
+    # Check if normalization was needed (sum != 100)
+    if abs(total_raw - 100.0) > 0.5:
+        # Show warning with before → after for each asset
+        change_lines = []
+        for asset in selected_assets:
+            asset_short = asset.split(" (")[0] if " (" in asset else asset
+            change_lines.append(f"- {asset_short}: {raw_weights[asset]:.0f}% → {normalized_weights[asset]:.1f}%")
+        st.warning(
+            f"⚠️ Weights sum to **{total_raw:.0f}%** (not 100%). Normalizing automatically.\n\n"
+            + "\n".join(change_lines)
+        )
+    else:
+        # Display compact allocation summary (no normalization needed)
+        alloc_parts = []
+        for asset in selected_assets:
+            asset_short = asset.split(" (")[0] if " (" in asset else asset
+            alloc_parts.append(f"{asset_short}: **{normalized_weights[asset]:.1f}%**")
+        st.caption(" · ".join(alloc_parts))
+    
+    rows = []
+    for asset in selected_assets:
+        if asset in asset_mapping:
+            name, ticker = asset_mapping[asset]
+            rows.append({
+                "Asset": asset,
+                "Asset Name": name,
+                "Ticker": ticker,
+                "Weight (%)": normalized_weights[asset],
+            })
+    
+    df = pd.DataFrame(rows)
 
     try:
         p = _build_portfolio_from_manual(
             portfolio_name=portfolio_name,
             df=df,
             value_eur=None,
-            normalize=bool(normalize),
+            normalize=True,  # Always normalize in slider mode
         )
         
         # Show JSON download/preview if requested
@@ -999,7 +1131,7 @@ elif page == "analyze":
             available_start, available_end = None, None
 
         if available_start and available_end:
-            st.caption(f"Available data range: **{available_start}** to **{available_end}**")
+            # st.caption(f"Available data range: **{available_start}** to **{available_end}**")
             date_c1, date_c2 = st.columns(2)
             with date_c1:
                 user_start = st.date_input(
@@ -1390,7 +1522,7 @@ elif page == "compare":
             pass
 
     if available_start and available_end:
-        st.caption(f"Common data range: **{available_start}** to **{available_end}**")
+        # st.caption(f"Common data range: **{available_start}** to **{available_end}**")
         date_c1, date_c2 = st.columns(2)
         with date_c1:
             user_start = st.date_input(
@@ -1973,7 +2105,7 @@ elif page == "whatif":
             available_start, available_end = None, None
 
         if available_start and available_end:
-            st.caption(f"Available data range: **{available_start}** to **{available_end}**")
+            # st.caption(f"Available data range: **{available_start}** to **{available_end}**")
             date_c1, date_c2 = st.columns(2)
             with date_c1:
                 user_start = st.date_input(
