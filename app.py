@@ -114,7 +114,7 @@ def _rf_annual_controls(*, key_prefix: str, default_series: str = "ECBDFR") -> f
     mode = st.radio(
         "Risk-free rate",
         options=["Manual", "Federal Reserve Economic Data (FRED)"],
-        index=0,
+        index=1,
         horizontal=True,
         key=f"{key_prefix}_rf_mode",
         help="Used for Sharpe/Sortino in analysis + comparisons/backtests.",
@@ -255,12 +255,15 @@ def _portfolio_json_from_manual(
 ) -> dict[str, Any]:
     assets: list[dict[str, Any]] = []
     for _, row in df.iterrows():
+        weight = float(row["Weight (%)"])
+        # If Target (%) column exists, use it; otherwise use Weight (%) as target
+        target = float(row["Target (%)"]) if "Target (%)" in row.index else weight
         assets.append(
             {
                 "Name": str(row["Asset Name"]).strip(),
                 "Ticker": str(row["Ticker"]).strip(),
-                "Weight": float(row["Weight (%)"]),
-                "Target": float(row["Target (%)"]),
+                "Weight": weight,
+                "Target": target,
             }
         )
     obj: dict[str, Any] = {"Name": str(portfolio_name).strip() or "Portfolio", "Assets": assets}
@@ -283,11 +286,19 @@ def _build_portfolio_from_manual(
     data["Asset Name"] = data["Asset Name"].astype(str).str.strip()
     data["Ticker"] = data["Ticker"].astype(str).str.strip()
     data["Weight (%)"] = pd.to_numeric(data["Weight (%)"], errors="coerce")
-    data["Target (%)"] = pd.to_numeric(data["Target (%)"], errors="coerce")
-    data = data.dropna(subset=["Ticker", "Weight (%)", "Target (%)"], how="any")
+    
+    # If Target (%) column doesn't exist, use Weight (%) as target
+    has_target_col = "Target (%)" in data.columns
+    if has_target_col:
+        data["Target (%)"] = pd.to_numeric(data["Target (%)"], errors="coerce")
+        data = data.dropna(subset=["Ticker", "Weight (%)", "Target (%)"], how="any")
+    else:
+        data = data.dropna(subset=["Ticker", "Weight (%)"], how="any")
+        data["Target (%)"] = data["Weight (%)"]
+    
     data = data[data["Ticker"].astype(str).str.len() > 0]
     if data.empty:
-        raise ValueError("No valid rows. Provide at least one asset with Ticker/Weight/Target.")
+        raise ValueError("No valid rows. Provide at least one asset with Ticker/Weight.")
 
     # enforce unique tickers
     tickers = data["Ticker"].tolist()
@@ -306,8 +317,8 @@ def _build_portfolio_from_manual(
 
     tol = 0.25
     if abs(w_sum - 100.0) > tol:
-        raise ValueError(f"Current weights must sum to 100 (±{tol}). Got {w_sum:.4f}.")
-    if abs(t_sum - 100.0) > tol:
+        raise ValueError(f"Weights must sum to 100 (±{tol}). Got {w_sum:.4f}.")
+    if has_target_col and abs(t_sum - 100.0) > tol:
         raise ValueError(f"Target weights must sum to 100 (±{tol}). Got {t_sum:.4f}.")
 
     assets = data["Asset Name"].tolist()
@@ -338,7 +349,7 @@ def portfolio_builder(
 
     source = st.radio(
         "Create / load portfolio",
-        options=["Built-in JSON", "Upload JSON", "Manual"],
+        options=["Manual", "Built-in JSON", "Upload JSON"],
         horizontal=True,
         key=f"{key}_source",
     )
@@ -413,18 +424,33 @@ def portfolio_builder(
     if not default_bonds and len(asset_options) > 1:
         default_bonds = asset_options[1] if asset_options[1] != default_stocks else (asset_options[0] if asset_options[0] != default_stocks else "")
     
-    default = pd.DataFrame(
-        [
-            {"Asset": default_stocks, "Weight (%)": 60.0, "Target (%)": 60.0},
-            {"Asset": default_bonds, "Weight (%)": 40.0, "Target (%)": 40.0},
-        ]
-    )
-    edited_df = st.data_editor(
-        default,
-        num_rows="dynamic",
-        use_container_width=True,
-        key=f"{key}_editor",
-        column_config={
+    # For rebalancing (allow_value=True), show both Weight and Target columns
+    # For other sections, show only Weight column (Target = Weight automatically)
+    if allow_value:
+        default = pd.DataFrame(
+            [
+                {"Asset": default_stocks, "Weight (%)": 60.0, "Target (%)": 60.0},
+                {"Asset": default_bonds, "Weight (%)": 40.0, "Target (%)": 40.0},
+            ]
+        )
+        column_config = {
+            "Asset": st.column_config.SelectboxColumn(
+                "Asset",
+                options=asset_options,
+                required=True,
+                help="Select an asset from the available list",
+            ),
+            "Weight (%)": st.column_config.NumberColumn(required=True, min_value=0.0, help="Current allocation"),
+            "Target (%)": st.column_config.NumberColumn(required=True, min_value=0.0, help="Target allocation"),
+        }
+    else:
+        default = pd.DataFrame(
+            [
+                {"Asset": default_stocks, "Weight (%)": 60.0},
+                {"Asset": default_bonds, "Weight (%)": 40.0},
+            ]
+        )
+        column_config = {
             "Asset": st.column_config.SelectboxColumn(
                 "Asset",
                 options=asset_options,
@@ -432,8 +458,14 @@ def portfolio_builder(
                 help="Select an asset from the available list",
             ),
             "Weight (%)": st.column_config.NumberColumn(required=True, min_value=0.0),
-            "Target (%)": st.column_config.NumberColumn(required=True, min_value=0.0),
-        },
+        }
+    
+    edited_df = st.data_editor(
+        default,
+        num_rows="dynamic",
+        use_container_width=True,
+        key=f"{key}_editor",
+        column_config=column_config,
     )
     
     # Convert to records and back to completely flatten any MultiIndex structure
@@ -454,15 +486,23 @@ def portfolio_builder(
     df["Asset Name"] = asset_names
     df["Ticker"] = tickers
 
-    normalize = st.checkbox("Auto-normalize Weight/Target columns to sum to 100", value=True, key=f"{key}_normalize")
-
-    # Show sums
-    try:
-        w_sum = float(pd.to_numeric(df["Weight (%)"], errors="coerce").sum())
-        t_sum = float(pd.to_numeric(df["Target (%)"], errors="coerce").sum())
-        st.caption(f"Current weights sum: {w_sum:.3f} | Target weights sum: {t_sum:.3f}")
-    except Exception:
-        pass
+    if allow_value:
+        normalize = st.checkbox("Auto-normalize weights to sum to 100", value=True, key=f"{key}_normalize")
+        # Show sums for both Weight and Target
+        try:
+            w_sum = float(pd.to_numeric(df["Weight (%)"], errors="coerce").sum())
+            t_sum = float(pd.to_numeric(df["Target (%)"], errors="coerce").sum())
+            st.caption(f"Current weights sum: {w_sum:.3f} | Target weights sum: {t_sum:.3f}")
+        except Exception:
+            pass
+    else:
+        normalize = st.checkbox("Auto-normalize weights to sum to 100", value=True, key=f"{key}_normalize")
+        # Show sum for Weight only
+        try:
+            w_sum = float(pd.to_numeric(df["Weight (%)"], errors="coerce").sum())
+            st.caption(f"Weights sum: {w_sum:.3f}")
+        except Exception:
+            pass
 
     try:
         built_json_obj = _portfolio_json_from_manual(portfolio_name=portfolio_name, df=df, value_eur=value_eur if allow_value else None)
@@ -500,6 +540,7 @@ def _manual_portfolio_builder(
 ) -> Portfolio | None:
     """
     Simplified portfolio builder that only allows manual entry (no JSON options).
+    Uses a single Weight column (Target = Weight automatically).
     """
     if title:
         st.subheader(title)
@@ -532,8 +573,8 @@ def _manual_portfolio_builder(
     
     default = pd.DataFrame(
         [
-            {"Asset": default_stocks, "Weight (%)": 60.0, "Target (%)": 60.0},
-            {"Asset": default_bonds, "Weight (%)": 40.0, "Target (%)": 40.0},
+            {"Asset": default_stocks, "Weight (%)": 60.0},
+            {"Asset": default_bonds, "Weight (%)": 40.0},
         ]
     )
     edited_df = st.data_editor(
@@ -549,7 +590,6 @@ def _manual_portfolio_builder(
                 help="Select an asset from the available list",
             ),
             "Weight (%)": st.column_config.NumberColumn(required=True, min_value=0.0),
-            "Target (%)": st.column_config.NumberColumn(required=True, min_value=0.0),
         },
     )
     
@@ -571,12 +611,11 @@ def _manual_portfolio_builder(
     df["Asset Name"] = asset_names
     df["Ticker"] = tickers
 
-    normalize = st.checkbox("Auto-normalize Weight/Target columns to sum to 100", value=True, key=f"{key}_normalize")
+    normalize = st.checkbox("Auto-normalize weights to sum to 100", value=True, key=f"{key}_normalize")
 
     try:
         w_sum = float(pd.to_numeric(df["Weight (%)"], errors="coerce").sum())
-        t_sum = float(pd.to_numeric(df["Target (%)"], errors="coerce").sum())
-        st.caption(f"Current weights sum: {w_sum:.3f} | Target weights sum: {t_sum:.3f}")
+        st.caption(f"Weights sum: {w_sum:.3f}")
     except Exception:
         pass
 
@@ -724,7 +763,7 @@ def _compare_portfolios_streamlit(
                 "Sharpe": float(stats.get("sharpe", float("nan"))),
                 "Sortino": float(stats.get("sortino", float("nan"))),
                 "Max Drawdown": float(stats.get("max_drawdown", float("nan"))),
-                "Max Gain": float(stats.get("max_gain", float("nan"))),
+                "Ulcer Index": float(stats.get("ulcer_index", float("nan"))),
             }
         )
 
@@ -946,10 +985,11 @@ if page == "home":
 
 
 elif page == "analyze":
-    st.markdown("### Settings")
-    rebalance_frequency, initial_amount, rf_annual = _backtest_controls(key_prefix="analyze")
     p, _ = portfolio_builder(key="analyze", title="Portfolio", allow_value=False)
     if p is not None:
+        st.markdown("### Settings")
+        rebalance_frequency, initial_amount, rf_annual = _backtest_controls(key_prefix="analyze")
+        
         # Get available date range from portfolio data
         try:
             prices_raw = p._prices_df().dropna(how="any").sort_index()
@@ -958,7 +998,6 @@ elif page == "analyze":
         except Exception:
             available_start, available_end = None, None
 
-        st.markdown("#### Analysis period")
         if available_start and available_end:
             st.caption(f"Available data range: **{available_start}** to **{available_end}**")
             date_c1, date_c2 = st.columns(2)
@@ -1074,14 +1113,20 @@ elif page == "analyze":
             st.caption(f"Analysis period: {results['start_date']} → {results['end_date']}")
 
             stats = results["stats"]
-            m1, m2, m3, m4, m5 = st.columns(5)
+            # First row: CAGR, Vol, Max Drawdown
+            m1, m2, m3 = st.columns(3)
             m1.metric("CAGR", f"{stats['cagr']*100:.2f}%" if np.isfinite(stats["cagr"]) else "—")
             m2.metric("Vol (ann.)", f"{stats['vol_annual']*100:.2f}%" if np.isfinite(stats["vol_annual"]) else "—")
-            m3.metric("Sharpe", f"{stats['sharpe']:.2f}" if np.isfinite(stats["sharpe"]) else "—")
-            m4.metric("Sortino", f"{stats['sortino']:.2f}" if np.isfinite(stats["sortino"]) else "—")
             max_dd = stats.get("max_drawdown", float("nan"))
             max_dd_display = f"{max_dd*100:.2f}%" if np.isfinite(max_dd) else "—"
-            m5.metric("Max Drawdown", max_dd_display)
+            m3.metric("Max Drawdown", max_dd_display)
+            # Second row: Sharpe, Sortino, Ulcer Index
+            m4, m5, m6 = st.columns(3)
+            m4.metric("Sharpe", f"{stats['sharpe']:.2f}" if np.isfinite(stats["sharpe"]) else "—")
+            m5.metric("Sortino", f"{stats['sortino']:.2f}" if np.isfinite(stats["sortino"]) else "—")
+            ulcer = stats.get("ulcer_index", float("nan"))
+            ulcer_display = f"{ulcer:.2f}" if np.isfinite(ulcer) else "—"
+            m6.metric("Ulcer Index", ulcer_display)
 
             with st.expander("What do these metrics mean?", expanded=False):
                 st.markdown("""
@@ -1094,6 +1139,8 @@ elif page == "analyze":
 **Sortino Ratio** — Similar to Sharpe, but only penalizes *downside* volatility (losses), not upside movements. More relevant if you care primarily about avoiding losses rather than overall stability.
 
 **Max Drawdown** — The largest peak-to-trough decline during the period. A -30% max drawdown means at some point the portfolio lost 30% from its previous high before recovering.
+
+**Ulcer Index** — Measures downside volatility by computing the quadratic mean of percentage drawdowns from peak. Lower is better: below 5 is excellent, 5-10 is good, 10-15 is moderate, above 15 indicates significant drawdown stress.
                 """)
 
             # Pie chart
@@ -1242,9 +1289,6 @@ This chart shows how each non-stock asset's returns have moved relative to your 
 
 
 elif page == "compare":
-    st.markdown("### Settings")
-    rebalance_frequency, initial_amount, rf_annual = _backtest_controls(key_prefix="compare")
-
     st.markdown("### Portfolios to compare")
 
     portfolios_dir = os.path.join(CACHE_DIR, "portfolios")
@@ -1285,7 +1329,7 @@ elif page == "compare":
                 pass
     
     # Multiple manual portfolios
-    st.markdown("#### Manual portfolios")
+    # st.markdown("#### Manual portfolios")
     num_manual = st.number_input(
         "Number of manual portfolios to add",
         min_value=0,
@@ -1324,6 +1368,10 @@ elif page == "compare":
     for mp in manual_portfolios:
         all_portfolios.append((getattr(mp, "name", "Manual"), mp))
 
+    # Settings section (after portfolios)
+    st.markdown("### Settings")
+    rebalance_frequency, initial_amount, rf_annual = _backtest_controls(key_prefix="compare")
+
     # Determine common date range across all selected portfolios
     available_start, available_end = None, None
     if len(all_portfolios) >= 2:
@@ -1341,7 +1389,6 @@ elif page == "compare":
         except Exception:
             pass
 
-    st.markdown("#### Analysis period")
     if available_start and available_end:
         st.caption(f"Common data range: **{available_start}** to **{available_end}**")
         date_c1, date_c2 = st.columns(2)
@@ -1437,7 +1484,7 @@ elif page == "compare":
                             "Sharpe": float(stats.get("sharpe", float("nan"))),
                             "Sortino": float(stats.get("sortino", float("nan"))),
                             "Max Drawdown": float(stats.get("max_drawdown", float("nan"))),
-                            "Max Gain": float(stats.get("max_gain", float("nan"))),
+                            "Ulcer Index": float(stats.get("ulcer_index", float("nan"))),
                         }
                     )
 
@@ -1476,9 +1523,11 @@ elif page == "compare":
 
                 # Format and display statistics table with % symbols
                 pretty = df.copy()
-                pct_cols = ["Total Return", "CAGR", "Vol (ann.)", "Max Drawdown", "Max Gain"]
+                pct_cols = ["Total Return", "CAGR", "Vol (ann.)", "Max Drawdown"]
                 for c in pct_cols:
                     pretty[c] = (pretty[c].astype(float) * 100.0).round(2).astype(str) + "%"
+                # Format Ulcer Index (not a percentage)
+                pretty["Ulcer Index"] = pretty["Ulcer Index"].astype(float).round(2)
                 pretty[["Sharpe", "Sortino"]] = pretty[["Sharpe", "Sortino"]].astype(float).round(2)
                 st.dataframe(pretty, use_container_width=True)
 
@@ -1496,9 +1545,9 @@ elif page == "compare":
 
 **Max Drawdown** — The worst peak-to-trough decline, showing the maximum pain an investor would have experienced during the period.
 
-**Max Gain** — The best peak-to-trough gain, showing the maximum upside captured during the period.
+**Ulcer Index** — Measures downside volatility using the quadratic mean of percentage drawdowns. Lower is better: below 5 is excellent, 5-10 is good, 10-15 is moderate, above 15 indicates significant stress.
 
-*A portfolio with higher CAGR but also higher Max Drawdown may not suit risk-averse investors.*
+*A portfolio with higher CAGR but also higher Max Drawdown or Ulcer Index may not suit risk-averse investors.*
                     """)
 
                 # Build Altair chart
@@ -1734,7 +1783,7 @@ The algorithm prioritizes underweight assets while ensuring no selling is requir
 
             if results["diag_transposed"] is not None:
                 st.markdown("### Portfolio diagnostics")
-                st.dataframe(results["diag_transposed"].round(4), use_container_width=True)
+                st.dataframe(results["diag_transposed"], use_container_width=True)
                 
                 with st.expander("What do these diagnostics mean?", expanded=False):
                     st.markdown("""
@@ -1835,8 +1884,6 @@ These macro indicators provide context for investment decisions.
 
 
 elif page == "whatif":
-    st.markdown("### What if you add new assets?")
-    rebalance_frequency, _, rf_annual = _backtest_controls(key_prefix="whatif", show_initial_amount=False)
     p, _ = portfolio_builder(key="whatif", title="Base portfolio", allow_value=False)
     if p is not None:
         # Load predefined candidate assets
@@ -1912,6 +1959,49 @@ elif page == "whatif":
                 help=f"Maximum: {max_swap_pct:.1f}% (current weight of selected source asset)",
             )
             swap_weight = swap_pct / 100.0
+
+        # Settings section
+        st.markdown("### Settings")
+        rebalance_frequency, _, rf_annual = _backtest_controls(key_prefix="whatif", show_initial_amount=False)
+
+        # Get available date range from portfolio data
+        try:
+            prices_raw = p._prices_df().dropna(how="any").sort_index()
+            available_start = prices_raw.index.min().date() if not prices_raw.empty else None
+            available_end = prices_raw.index.max().date() if not prices_raw.empty else None
+        except Exception:
+            available_start, available_end = None, None
+
+        if available_start and available_end:
+            st.caption(f"Available data range: **{available_start}** to **{available_end}**")
+            date_c1, date_c2 = st.columns(2)
+            with date_c1:
+                user_start = st.date_input(
+                    "Start date",
+                    value=available_start,
+                    min_value=available_start,
+                    max_value=available_end,
+                    key="whatif_start_date",
+                )
+            with date_c2:
+                user_end = st.date_input(
+                    "End date",
+                    value=available_end,
+                    min_value=available_start,
+                    max_value=available_end,
+                    key="whatif_end_date",
+                )
+        else:
+            st.warning("Could not determine available date range from portfolio data.")
+            user_start, user_end = None, None
+
+        y_scale = st.radio(
+            "Y-axis scale (for value chart)",
+            options=["Linear", "Logarithmic"],
+            index=0,
+            horizontal=True,
+            key="whatif_y_scale",
+        )
 
         run = st.button("Run what-if", type="primary", key="whatif_run")
 
@@ -2092,12 +2182,15 @@ elif page == "whatif":
                     if cand_weights:
                         universe = Portfolio.fill_non_trading_days(raw[portfolio_tickers + list(cand_weights.keys())], freq="D")
                         rows: list[dict[str, Any]] = []
+                        value_series: dict[str, pd.Series] = {}
+                        
                         px_base = universe[portfolio_tickers]
                         v_base = Portfolio.backtest_value_series(
                             px_base, base_target_weights, rebalance_frequency=str(rebalance_frequency), initial_value=1.0
                         )
                         s_base = Portfolio.backtest_stats(v_base, rf_annual=float(rf_annual))
                         rows.append({"Portfolio": "Baseline", **s_base})
+                        value_series["Baseline"] = v_base
 
                         for c, w in cand_weights.items():
                             cols = portfolio_tickers + [c]
@@ -2105,16 +2198,20 @@ elif page == "whatif":
                             v = Portfolio.backtest_value_series(px, w, rebalance_frequency=str(rebalance_frequency), initial_value=1.0)
                             s = Portfolio.backtest_stats(v, rf_annual=float(rf_annual))
                             cand_name = candidate_name_map.get(c, c)
-                            rows.append({"Portfolio": f"Baseline + {cand_name}", **s})
+                            portfolio_label = f"+ {cand_name}"
+                            rows.append({"Portfolio": portfolio_label, **s})
+                            value_series[portfolio_label] = v
 
                         df = pd.DataFrame(rows).set_index("Portfolio")
                         backtest_df = pd.DataFrame(index=df.index)
-                        backtest_df["Total Return (%)"] = (df["total_return"].astype(float) * 100.0).round(2)
-                        backtest_df["CAGR (%)"] = (df["cagr"].astype(float) * 100.0).round(2)
-                        backtest_df["Volatility (%)"] = (df["vol_annual"].astype(float) * 100.0).round(2)
-                        backtest_df["Max Drawdown (%)"] = (df["max_drawdown"].astype(float) * 100.0).round(2)
+                        # Format percentage columns with % in cell values (matching comparison section)
+                        backtest_df["Total Return"] = (df["total_return"].astype(float) * 100.0).round(2).astype(str) + "%"
+                        backtest_df["CAGR"] = (df["cagr"].astype(float) * 100.0).round(2).astype(str) + "%"
+                        backtest_df["Vol (ann.)"] = (df["vol_annual"].astype(float) * 100.0).round(2).astype(str) + "%"
                         backtest_df["Sharpe"] = df["sharpe"].astype(float).round(2)
                         backtest_df["Sortino"] = df["sortino"].astype(float).round(2)
+                        backtest_df["Max Drawdown"] = (df["max_drawdown"].astype(float) * 100.0).round(2).astype(str) + "%"
+                        backtest_df["Ulcer Index"] = df["ulcer_index"].astype(float).round(2)
                         llm_backtest_df = backtest_df
 
                     # Generate LLM prompt
@@ -2144,6 +2241,7 @@ elif page == "whatif":
                         "rrr_transposed": rrr_transposed,
                         "rrr_error": rrr_error,
                         "backtest_df": backtest_df,
+                        "value_series": value_series if cand_weights else {},
                         "llm_prompt": llm_prompt,
                         "portfolio_name": getattr(p, "name", "Portfolio"),
                         "swap_pct": swap_pct,
@@ -2227,20 +2325,51 @@ This table shows how each candidate asset relates to your existing portfolio.
                     st.markdown("""
 This table compares historical performance between your baseline portfolio and portfolios with each candidate asset added.
 
-**Total Return (%)** — Cumulative gain/loss over the entire analysis period.
+**Total Return** — Cumulative gain/loss over the entire analysis period.
 
-**CAGR (%)** — Compound Annual Growth Rate, the average annual return assuming reinvestment. Higher is better for comparing across different time periods.
+**CAGR** — Compound Annual Growth Rate, the average annual return assuming reinvestment. Higher is better for comparing across different time periods.
 
-**Volatility (%)** — Annualized standard deviation of returns. Lower generally indicates more stable returns, though this is a trade-off with potential returns.
-
-**Max Drawdown (%)** — The largest peak-to-trough decline during the period. Less negative values indicate smaller worst-case losses.
+**Vol (ann.)** — Annualized standard deviation of returns. Lower generally indicates more stable returns, though this is a trade-off with potential returns.
 
 **Sharpe** — Risk-adjusted return calculated as (Return - Risk-free) / Volatility. Higher is better: above 0.5 is decent, above 1.0 is good.
 
 **Sortino** — Similar to Sharpe but only penalizes downside volatility. Higher is better, especially relevant for loss-averse investors.
 
+**Max Drawdown** — The largest peak-to-trough decline during the period. Less negative values indicate smaller worst-case losses.
+
+**Ulcer Index** — Measures downside volatility using the quadratic mean of percentage drawdowns. Lower is better: below 5 is excellent, 5-10 is good, above 10 indicates stress.
+
 *Note: Past performance does not guarantee future results. Use backtests as one input among many considerations.*
                     """)
+
+                # Portfolio value chart (like comparison section)
+                value_series = results.get("value_series", {})
+                if value_series:
+                    st.markdown("#### Portfolio value over time")
+                    chart_data = []
+                    for name, v in value_series.items():
+                        for date, value in v.items():
+                            chart_data.append({"Date": date, "Portfolio": name, "Value": float(value)})
+                    chart_df = pd.DataFrame(chart_data)
+
+                    y_scale_type = "log" if y_scale == "Logarithmic" else "linear"
+                    chart = (
+                        alt.Chart(chart_df)
+                        .mark_line(strokeWidth=2.0)
+                        .encode(
+                            x=alt.X("Date:T", title="Date", axis=alt.Axis(format="%m/%Y")),
+                            y=alt.Y("Value:Q", title="Value (normalized)", scale=alt.Scale(type=y_scale_type)),
+                            color=alt.Color("Portfolio:N", title="Portfolio"),
+                            tooltip=[
+                                alt.Tooltip("Date:T", title="Date"),
+                                alt.Tooltip("Portfolio:N", title="Portfolio"),
+                                alt.Tooltip("Value:Q", title="Value", format=",.4f"),
+                            ],
+                        )
+                        .properties(height=400)
+                        .interactive()
+                    )
+                    st.altair_chart(chart, use_container_width=True)
 
             # AI-Assisted Analysis section (combined prompt + query)
             if results["llm_prompt"]:

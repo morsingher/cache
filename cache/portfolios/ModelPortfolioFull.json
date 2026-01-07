@@ -4,7 +4,7 @@
         {
             "Name": "Stocks",
             "Ticker": "ACWE.MI",
-            "Weight": 61.14,
+            "Weight": 71.14,
             "Target": 60.0
         },
         {
@@ -28,15 +28,15 @@
         {
             "Name": "Managed Futures",
             "Ticker": "DBMF",
-            "Weight": 5.0,
+            "Weight": 0.0,
             "Target": 5.0
         },
         {
             "Name": "Commodity Carry",
             "Ticker": "UEQC.DE",
-            "Weight": 5.0,
+            "Weight": 0.0,
             "Target": 5.0
         }
     ],
-    "Value": 85000.00
+    "Value": 81500.00
 }

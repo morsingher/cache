@@ -380,6 +380,30 @@ class Portfolio:
         return float(gain.max())
 
     @staticmethod
+    def ulcer_index(value: pd.Series) -> float:
+        """
+        Ulcer Index: measures downside volatility by computing the quadratic mean
+        of percentage drawdowns from peak.
+        
+        UI = sqrt(mean(drawdown^2))
+        
+        Lower is better. Values typically range from 0 (no drawdowns) to 20+ (severe).
+        """
+        if value is None or value.empty:
+            return float("nan")
+        v = pd.to_numeric(value, errors="coerce").dropna()
+        if v.empty or len(v) < 2:
+            return float("nan")
+        
+        # Compute running maximum (peak)
+        peak = v.cummax()
+        # Percentage drawdown from peak (as positive values for squaring)
+        drawdown_pct = ((peak - v) / peak) * 100.0
+        # Ulcer Index = sqrt(mean(drawdown^2))
+        ui = float(np.sqrt((drawdown_pct ** 2).mean()))
+        return ui
+
+    @staticmethod
     def backtest_stats(
         value: pd.Series,
         *,
@@ -401,6 +425,7 @@ class Portfolio:
                 "sharpe": float("nan"),
                 "sortino": float("nan"),
                 "max_drawdown": float("nan"),
+                "ulcer_index": float("nan"),
             }
         v = pd.to_numeric(value, errors="coerce").dropna()
         if len(v) < 3:
@@ -411,6 +436,7 @@ class Portfolio:
                 "sharpe": float("nan"),
                 "sortino": float("nan"),
                 "max_drawdown": float("nan"),
+                "ulcer_index": float("nan"),
             }
 
         total_return = float(v.iloc[-1] / v.iloc[0] - 1.0)
@@ -431,6 +457,7 @@ class Portfolio:
 
         mdd = Portfolio.max_drawdown(v)
         mg = Portfolio.max_gain(v)
+        ui = Portfolio.ulcer_index(v)
 
         return {
             "total_return": total_return,
@@ -440,6 +467,7 @@ class Portfolio:
             "sortino": sortino,
             "max_drawdown": mdd,
             "max_gain": mg,
+            "ulcer_index": ui,
         }
 
     @staticmethod

@@ -357,16 +357,23 @@ def compute_rebalancing_diagnostics(
     label = (lambda t: portfolio._label(t)) if hasattr(portfolio, "_label") else (lambda t: t)
     idx = [label(t) for t in tickers]
 
+    # Helper to format percentage values with % symbol and 2 decimal places
+    def _fmt_pct(val: float) -> str:
+        return f"{val:.2f}%" if pd.notna(val) else "—"
+    
+    def _fmt_num(val: float) -> str:
+        return f"{val:.2f}" if pd.notna(val) else "—"
+    
     table = pd.DataFrame(index=idx)
-    table["CAGR (12m, %)"] = [float(cagr_12m[t]) * 100.0 if pd.notna(cagr_12m[t]) else np.nan for t in tickers]
-    table["EWMA Price Distance % (3m)"] = [((current_price[t] / float(ewma_price_df.loc[t, "3m"])) - 1.0) * 100.0 if pd.notna(current_price[t]) and pd.notna(ewma_price_df.loc[t, "3m"]) else np.nan for t in tickers]
-    table["EWMA Price Distance % (6m)"] = [((current_price[t] / float(ewma_price_df.loc[t, "6m"])) - 1.0) * 100.0 if pd.notna(current_price[t]) and pd.notna(ewma_price_df.loc[t, "6m"]) else np.nan for t in tickers]
-    table["EWMA Price Distance % (12m)"] = [((current_price[t] / float(ewma_price_df.loc[t, "12m"])) - 1.0) * 100.0 if pd.notna(current_price[t]) and pd.notna(ewma_price_df.loc[t, "12m"]) else np.nan for t in tickers]
-    table["EWMA Volatility % (Annualized)"] = [float(ewma_vol[t]) * np.sqrt(float(trading_days_per_year)) * 100.0 if pd.notna(ewma_vol[t]) else np.nan for t in tickers]
-    table["Z-Score (12m, on prices)"] = [float(zscore[t]) for t in tickers]
+    table["CAGR 12m"] = [_fmt_pct(float(cagr_12m[t]) * 100.0) if pd.notna(cagr_12m[t]) else "—" for t in tickers]
+    table["EWMA Price Dist 3m"] = [_fmt_pct(((current_price[t] / float(ewma_price_df.loc[t, "3m"])) - 1.0) * 100.0) if pd.notna(current_price[t]) and pd.notna(ewma_price_df.loc[t, "3m"]) else "—" for t in tickers]
+    table["EWMA Price Dist 6m"] = [_fmt_pct(((current_price[t] / float(ewma_price_df.loc[t, "6m"])) - 1.0) * 100.0) if pd.notna(current_price[t]) and pd.notna(ewma_price_df.loc[t, "6m"]) else "—" for t in tickers]
+    table["EWMA Price Dist 12m"] = [_fmt_pct(((current_price[t] / float(ewma_price_df.loc[t, "12m"])) - 1.0) * 100.0) if pd.notna(current_price[t]) and pd.notna(ewma_price_df.loc[t, "12m"]) else "—" for t in tickers]
+    table["EWMA Vol (ann)"] = [_fmt_pct(float(ewma_vol[t]) * np.sqrt(float(trading_days_per_year)) * 100.0) if pd.notna(ewma_vol[t]) else "—" for t in tickers]
+    table["Z-Score 12m"] = [_fmt_num(float(zscore[t])) for t in tickers]
     # Add correlation to stocks if computed (from portfolio stocks or external stocks)
     if stocks_bench_m is not None:
-        table["Correlation to Stocks (12m, monthly)"] = [float(corr_12m_monthly[t]) for t in tickers]
+        table["Corr vs Stocks 12m"] = [_fmt_num(float(corr_12m_monthly[t])) for t in tickers]
 
     table.index.name = None
     return table
@@ -446,11 +453,11 @@ def build_llm_rebalance_report(
 
     diagnostics_explain = (
         "Diagnostics table notes:\n"
-        "- CAGR (12m, %): annualized growth rate over ~the last 12 months of prices.\n"
-        "- EWMA Price Distance % (3m/6m/12m): (current price / EWMA price) - 1, using spans 63/126/252 trading days.\n"
-        "- EWMA Volatility % (Annualized): RiskMetrics EWMA volatility on daily log returns (lambda=0.94), annualized with sqrt(252).\n"
-        "- Z-Score (12m, on prices): (current price - mean) / std over the lookback price window.\n"
-        "- Correlation to Stocks (12m, monthly): correlation of monthly log returns vs the 'Stocks' benchmark.\n"
+        "- CAGR 12m: annualized growth rate over ~the last 12 months of prices.\n"
+        "- EWMA Price Dist 3m/6m/12m: (current price / EWMA price) - 1, using spans 63/126/252 trading days.\n"
+        "- EWMA Vol (ann): RiskMetrics EWMA volatility on daily log returns (lambda=0.94), annualized with sqrt(252).\n"
+        "- Z-Score 12m: (current price - mean) / std over the lookback price window.\n"
+        "- Corr vs Stocks 12m: correlation of monthly log returns vs the 'Stocks' benchmark.\n"
     )
 
     baseline_section = []
