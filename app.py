@@ -1254,17 +1254,17 @@ if page == "home":
             _go("whatif")
     
     # Global help section
-#     st.markdown("")
-#     with st.expander("ℹ️ What can this app do?", expanded=False):
-#         st.markdown("""
-# **Analyze a portfolio** — Evaluate a single portfolio's historical performance. See key metrics like CAGR, volatility, Sharpe ratio, and max drawdown. Visualize how your portfolio would have grown over time and understand correlations between assets.
+    st.markdown("")
+    with st.expander("ℹ️ What can this app do?", expanded=False):
+        st.markdown("""
+**Analyze a portfolio** — Evaluate a single portfolio's historical performance. See key metrics like CAGR, volatility, Sharpe ratio, and max drawdown. Visualize how your portfolio would have grown over time and understand correlations between assets.
 
-# **Compare portfolios** — Put multiple portfolios side-by-side to see which performed better historically. Useful for evaluating different allocation strategies (e.g., 60/40 vs 80/20) or comparing your portfolio against benchmarks.
+**Compare portfolios** — Put multiple portfolios side-by-side to see which performed better historically. Useful for evaluating different allocation strategies (e.g., 60/40 vs 80/20) or comparing your portfolio against benchmarks.
 
-# **Rebalance with new cash** — Calculate how to allocate new money to bring your portfolio back to target weights without selling. Includes macro-economic context and optional AI-assisted recommendations.
+**Rebalance with new cash** — Calculate how to allocate new money to bring your portfolio back to target weights without selling. Includes macro-economic context and optional AI-assisted recommendations.
 
-# **What-if: add an asset** — Explore what would happen if you added a new asset to your portfolio. Analyze diversification benefits, risk-adjusted returns, and backtest the modified portfolio against your baseline.
-#         """)
+**What-if: add an asset** — Explore what would happen if you added a new asset to your portfolio. Analyze diversification benefits, risk-adjusted returns, and backtest the modified portfolio against your baseline.
+        """)
 
 
 elif page == "analyze":
