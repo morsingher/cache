@@ -2,107 +2,133 @@
     "Assets": [
         {
             "Name": "Stocks",
-            "Ticker": "ACWE.MI"
+            "Ticker": "ACWE.MI",
+            "Short": "Stocks"
         },
         {
             "Name": "Bonds",
-            "Ticker": "AGGH.MI"
+            "Ticker": "AGGH.MI",
+            "Short": "Bonds"
         },
         {
             "Name": "Gold",
-            "Ticker": "SGLD.MI"
+            "Ticker": "SGLD.MI",
+            "Short": "Gold"
         },
         {
             "Name": "Crypto BTC",
-            "Ticker": "BTC-EUR"
+            "Ticker": "BTC-EUR",
+            "Short": "BTC"
         },
         {
             "Name": "Managed Futures",
-            "Ticker": "DBMF"
+            "Ticker": "DBMF",
+            "Short": "Man. Futures"
         },
         {
             "Name": "Commodity Carry",
-            "Ticker": "UEQC.DE"
+            "Ticker": "UEQC.DE",
+            "Short": "Comm. Carry"
         },
         {
             "Name": "Commodity Beta",
-            "Ticker": "CMOD.MI"
+            "Ticker": "CMOD.MI",
+            "Short": "Comm. Beta"
         },
         {
             "Name": "Stocks Multifactor", 
-            "Ticker": "JPGL.MI"
+            "Ticker": "JPGL.MI",
+            "Short": "Multifactor"
         },
         {
             "Name": "Cash", 
-            "Ticker": "XEON.MI"
+            "Ticker": "XEON.MI",
+            "Short": "Cash"
         },
         {
             "Name": "Crypto ETH", 
-            "Ticker": "ETH-EUR"
+            "Ticker": "ETH-EUR",
+            "Short": "ETH"
         },
         {
             "Name": "Bonds EUR Infl", 
-            "Ticker": "IBCI.MI"
+            "Ticker": "IBCI.MI",
+            "Short": "Bonds IL"
         },
         {
             "Name": "Real Estate", 
-            "Ticker": "EPRA.MI"
+            "Ticker": "EPRA.MI",
+            "Short": "REITs"
         },
         {
             "Name": "Stocks Min Vol", 
-            "Ticker": "MVOL.MI"
+            "Ticker": "MVOL.MI",
+            "Short": "Min Vol"
         },
         {
             "Name": "Stocks Momentum", 
-            "Ticker": "IWMO.MI"
+            "Ticker": "IWMO.MI",
+            "Short": "Momentum"
         },
         {
             "Name": "Bonds EUR HY", 
-            "Ticker": "EHYA.MI"
+            "Ticker": "EHYA.MI",
+            "Short": "Bonds HY"
         },
         {
             "Name": "Silver", 
-            "Ticker": "XAD6.MI"
+            "Ticker": "XAD6.MI",
+            "Short": "Silver"
         },
         {
             "Name": "Crypto SOL", 
-            "Ticker": "SOL-EUR"
+            "Ticker": "SOL-EUR",
+            "Short": "SOL"
         },
         {
             "Name": "Crypto XRP", 
-            "Ticker": "XRP-EUR"
+            "Ticker": "XRP-EUR",
+            "Short": "XRP"
         },
         {
             "Name": "Infl Exp EUR", 
-            "Ticker": "INFL.MI"
+            "Ticker": "INFL.MI",
+            "Short": "Infl Exp"
         },
         {
             "Name": "Stocks Value", 
-            "Ticker": "IWVL.MI"
+            "Ticker": "IWVL.MI",
+            "Short": "Value"
         },
         {
             "Name": "Stocks Quality", 
-            "Ticker": "IWQU.MI"
+            "Ticker": "IWQU.MI",
+            "Short": "Quality"
         },
         {
             "Name": "Stocks Small Cap", 
-            "Ticker": "IUSN.DE"
+            "Ticker": "IUSN.DE",
+            "Short": "Small Cap"
         },
         {
             "Name": "Stocks SCV", 
-            "Ticker": "ZPRVX"
+            "Ticker": "ZPRVX",
+            "Short": "SCV"
         },
         {
             "Name": "Stocks High Div", 
-            "Ticker": "GGRA.MI"
+            "Ticker": "GGRA.MI",
+            "Short": "High Div"
         },
         {
             "Name": "Bonds EUR", 
-            "Ticker": "VGEA.MI"
+            "Ticker": "VGEA.MI",
+            "Short": "Bonds EUR"
         },
         {
             "Name": "Commodity Mix", 
-            "Ticker": "CCUSAS.MI"
+            "Ticker": "CCUSAS.MI",
+            "Short": "Comm. Mix"
         }
     ]
 }

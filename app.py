@@ -67,44 +67,95 @@ def _cached_download_prices(tickers_tuple: tuple[str, ...]) -> pd.DataFrame:
 
 st.set_page_config(page_title="CACHE", page_icon="€", layout="centered")
 
-# Minimal styling: layout adjustments + red "Back" button only.
-# All other theming (including charts) follows system preference via Streamlit's native handling.
+# Register pastel color theme for Altair charts
+@alt.theme.register("pastel", enable=True)
+def _pastel_theme():
+    return {
+        "config": {
+            "range": {
+                "category": [
+                    "#AEC6CF",  # Pastel Blue
+                    "#FFB7C5",  # Pastel Pink
+                    "#B39EB5",  # Pastel Purple
+                    "#77DD77",  # Pastel Green
+                    "#FDFD96",  # Pastel Yellow
+                    "#FFB347",  # Pastel Orange
+                    "#CFCFC4",  # Pastel Grey
+                    "#F49AC2",  # Pastel Magenta
+                    "#B19CD9",  # Pastel Lavender
+                    "#FF6961",  # Pastel Red
+                ]
+            }
+        }
+    }
+
+# alt.theme.register("pastel", _pastel_theme)
+# alt.theme.enable("pastel")
+
+# Minimal CSS for elements not controllable via theme alone
 st.markdown(
     """
 <style>
-  .block-container {
-    padding-top: 4.2rem;
-    padding-bottom: 2.5rem;
-  }
-  div.stButton > button {
-    width: 100%;
-    height: 3.1rem;
-    font-size: 1.05rem;
-    border-radius: 0.8rem;
-    display: flex;
-    justify-content: center;
+/* Secondary buttons */
+button[kind="secondary"],
+button[data-testid="baseButton-secondary"] {
+    background-color: #ecebe3 !important;
+}
+
+/* Glide-data-grid (Streamlit dataframe) CSS custom properties */
+:root {
+    --gdg-bg-cell: #f4f3ed !important;
+    --gdg-bg-header: #ecebe3 !important;
+    --gdg-bg-header-has-focus: #e8e7dd !important;
+    --gdg-bg-header-hovered: #e8e7dd !important;
+    --gdg-accent-color: #bb5a38 !important;
+    --gdg-accent-light: #ecebe3 !important;
+    --gdg-bg-bubble: #ecebe3 !important;
+    --gdg-bg-bubble-selected: #e8e7dd !important;
+    --gdg-bg-search-result: #ecebe3 !important;
+}
+
+/* Additional table styling */
+.stDataFrame,
+[data-testid="stDataFrame"],
+[data-testid="stDataFrameResizableContainer"] {
+    --gdg-bg-cell: #f4f3ed !important;
+    --gdg-bg-header: #ecebe3 !important;
+    --gdg-bg-header-has-focus: #e8e7dd !important;
+    --gdg-bg-header-hovered: #e8e7dd !important;
+}
+
+/* Center the title area */
+[data-testid="stVerticalBlock"] > div:has(> [data-testid="stHeading"]),
+[data-testid="stVerticalBlock"] > div:has(> h1) {
     text-align: center;
-  }
-  button[kind="secondary"],
-  button[data-testid="baseButton-secondary"] {
-    background-color: #ef4444 !important;
-    color: #ffffff !important;
-    border: 1px solid #b91c1c !important;
-    min-width: 100%;
-    height: 3.1rem;
-    font-size: 1.05rem;
-    font-weight: 600;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    gap: 0.45rem;
-    white-space: nowrap;
-  }
-  button[kind="secondary"]:hover,
-  button[data-testid="baseButton-secondary"]:hover {
-    background-color: #dc2626 !important;
-    border-color: #991b1b !important;
-  }
+}
+
+/* Reduce space between title (h1) and subtitle (h2) */
+[data-testid="stHeading"] h1,
+h1[data-testid="stHeading"] {
+    margin-bottom: 0 !important;
+    padding-bottom: 0 !important;
+}
+[data-testid="stHeading"] h2 {
+    margin-top: 0 !important;
+    padding-top: 0 !important;
+}
+
+/* Style the custom title h1 */
+h1[data-testid="stHeading"] {
+    font-size: 52px !important;
+    font-weight: 600 !important;
+}
+
+/* Hide anchor links on all headers */
+[data-testid="stHeading"] a,
+h1 a[href^="#"],
+h2 a[href^="#"],
+h3 a[href^="#"],
+h4 a[href^="#"] {
+    display: none !important;
+}
 </style>
 """,
     unsafe_allow_html=True,
@@ -205,43 +256,54 @@ def _load_available_assets() -> list[dict[str, str]]:
         return []
 
 
-def _get_asset_options() -> tuple[list[str], dict[str, tuple[str, str]]]:
+def _get_asset_options() -> tuple[list[str], dict[str, tuple[str, str, str]], dict[str, str]]:
     """
     Get asset options for dropdown.
     Returns:
-        - List of display strings: "Name (Ticker)" sorted alphabetically by name
-        - Dict mapping display string to (Name, Ticker)
+        - List of Short names (used as option values, shown in selected chips)
+        - Dict mapping Short name to (Name, Ticker, Short)
+        - Dict mapping Short name to display string "Name (Ticker)" for format_func
     """
     assets = _load_available_assets()
     options = []
     mapping = {}
+    display_map = {}  # Short -> "Name (Ticker)" for format_func
     for asset in assets:
         name = asset.get("Name", "")
         ticker = asset.get("Ticker", "")
+        short = asset.get("Short", name)  # Fallback to Name if Short not present
         if name and ticker:
-            display = f"{name} ({ticker})"
-            options.append(display)
-            mapping[display] = (name, ticker)
-    # Sort options alphabetically by asset name (case-insensitive)
+            options.append(short)
+            mapping[short] = (name, ticker, short)
+            display_map[short] = f"{name} ({ticker})"
+    # Sort options alphabetically by short name (case-insensitive)
     options.sort(key=lambda x: x.lower())
-    return options, mapping
+    return options, mapping, display_map
+
+
+def _get_short_name_map() -> dict[str, str]:
+    """
+    Build a mapping from ticker to Short name for all available assets.
+    """
+    assets = _load_available_assets()
+    return {asset.get("Ticker", ""): asset.get("Short", asset.get("Name", "")) for asset in assets if asset.get("Ticker")}
 
 
 def _render_portfolio_preview(p: Portfolio) -> None:
-    """Render a compact allocation preview for a portfolio."""
-    assets_map = getattr(p, "assets", {})
+    """Render a compact allocation preview for a portfolio using Short names."""
     target_weights_pct = getattr(p, "target_weights_pct", {})
     tickers = getattr(p, "tickers", [])
     name = getattr(p, "name", "Portfolio")
+    short_map = _get_short_name_map()
     
     if not tickers or not target_weights_pct:
         return
     
     parts = []
     for ticker in tickers:
-        asset_name = assets_map.get(ticker, ticker)
+        short_name = short_map.get(ticker, ticker)
         weight = target_weights_pct.get(ticker, 0.0)
-        parts.append(f"{asset_name} ({weight:.1f}%)")
+        parts.append(f"{short_name} ({weight:.1f}%)")
     
     allocation_str = ", ".join(parts)
     st.caption(f"**{name}:** {allocation_str}")
@@ -253,15 +315,20 @@ def _portfolio_json_from_manual(
     df: pd.DataFrame,
     value_eur: float | None,
 ) -> dict[str, Any]:
+    short_map = _get_short_name_map()
     assets: list[dict[str, Any]] = []
     for _, row in df.iterrows():
         weight = round(float(row["Weight (%)"]), 2)
         # If Target (%) column exists, use it; otherwise use Weight (%) as target
         target = round(float(row["Target (%)"]), 2) if "Target (%)" in row.index else weight
+        ticker = str(row["Ticker"]).strip()
+        name = str(row["Asset Name"]).strip()
+        short = short_map.get(ticker, name)  # Fallback to Name if Short not found
         assets.append(
             {
-                "Name": str(row["Asset Name"]).strip(),
-                "Ticker": str(row["Ticker"]).strip(),
+                "Name": name,
+                "Ticker": ticker,
+                "Short": short,
                 "Weight": weight,
                 "Target": target,
             }
@@ -401,21 +468,21 @@ def portfolio_builder(
         if allow_value:
             value_eur = st.number_input("Current value (EUR)", min_value=0.0, value=80_000.0, step=1_000.0, key=f"{key}_value")
 
-    # Load available assets for dropdown
-    asset_options, asset_mapping = _get_asset_options()
+    # Load available assets for dropdown (options are Short names)
+    asset_options, asset_mapping, asset_display_map = _get_asset_options()
     if not asset_options:
         st.error("No assets available. Check `cache/assets/list.json`.")
         return None, None
 
-    # Default selections: 60% Stocks, 40% Bonds (find by name prefix)
-    def _find_asset_by_prefix(opts: list[str], prefix: str) -> str:
+    # Default selections: 60% Stocks, 40% Bonds (find by Short name)
+    def _find_asset_by_short(opts: list[str], short_name: str) -> str:
         for opt in opts:
-            if opt.lower().startswith(prefix.lower()):
+            if opt.lower() == short_name.lower():
                 return opt
         return opts[0] if opts else ""
     
-    default_stocks = _find_asset_by_prefix(asset_options, "Stocks (")
-    default_bonds = _find_asset_by_prefix(asset_options, "Bonds (")
+    default_stocks = _find_asset_by_short(asset_options, "Stocks")
+    default_bonds = _find_asset_by_short(asset_options, "Bonds")
     # Fallback if not found
     if not default_stocks and asset_options:
         default_stocks = asset_options[0]
@@ -446,7 +513,7 @@ def portfolio_builder(
         edited_df = st.data_editor(
             default,
             num_rows="dynamic",
-            use_container_width=True,
+            width="stretch",
             key=f"{key}_editor",
             column_config=column_config,
         )
@@ -458,7 +525,7 @@ def portfolio_builder(
         tickers = []
         for x in df["Asset"].tolist():
             if pd.notna(x) and x and x in asset_mapping:
-                name, ticker = asset_mapping[x]
+                name, ticker, _short = asset_mapping[x]
                 asset_names.append(name)
                 tickers.append(ticker)
             else:
@@ -480,11 +547,11 @@ def portfolio_builder(
             df["Weight (%)"] = df["Weight (%)"] / w_sum * 100.0
             df["Weight (%)"] = df["Weight (%)"].round(2)
             
+            # Asset column contains Short names directly
             change_lines = []
             for i, asset in enumerate(df["Asset"].tolist()):
                 if pd.notna(asset) and asset:
-                    asset_short = asset.split(" (")[0] if " (" in str(asset) else str(asset)
-                    change_lines.append(f"- {asset_short}: {raw_weights[i]:.0f}% → {df['Weight (%)'].iloc[i]:.1f}%")
+                    change_lines.append(f"- {asset}: {raw_weights[i]:.0f}% → {df['Weight (%)'].iloc[i]:.1f}%")
             st.warning(
                 f"⚠️ **Current weights** sum to **{w_sum:.0f}%** (not 100%). Normalizing automatically.\n\n"
                 + "\n".join(change_lines)
@@ -499,11 +566,11 @@ def portfolio_builder(
             df["Target (%)"] = df["Target (%)"] / t_sum * 100.0
             df["Target (%)"] = df["Target (%)"].round(2)
             
+            # Asset column contains Short names directly
             change_lines = []
             for i, asset in enumerate(df["Asset"].tolist()):
                 if pd.notna(asset) and asset:
-                    asset_short = asset.split(" (")[0] if " (" in str(asset) else str(asset)
-                    change_lines.append(f"- {asset_short}: {raw_targets[i]:.0f}% → {df['Target (%)'].iloc[i]:.1f}%")
+                    change_lines.append(f"- {asset}: {raw_targets[i]:.0f}% → {df['Target (%)'].iloc[i]:.1f}%")
             st.warning(
                 f"⚠️ **Target weights** sum to **{t_sum:.0f}%** (not 100%). Normalizing automatically.\n\n"
                 + "\n".join(change_lines)
@@ -511,15 +578,14 @@ def portfolio_builder(
         elif t_sum > 0:
             df["Target (%)"] = df["Target (%)"].round(2)
         
-        # Show normalized allocation summary
+        # Show normalized allocation summary (Asset column contains Short names)
         if w_sum > 0 and t_sum > 0:
             w_parts = []
             t_parts = []
             for i, asset in enumerate(df["Asset"].tolist()):
                 if pd.notna(asset) and asset:
-                    asset_short = asset.split(" (")[0] if " (" in str(asset) else str(asset)
-                    w_parts.append(f"{asset_short}: {df['Weight (%)'].iloc[i]:.1f}%")
-                    t_parts.append(f"{asset_short}: {df['Target (%)'].iloc[i]:.1f}%")
+                    w_parts.append(f"{asset}: {df['Weight (%)'].iloc[i]:.1f}%")
+                    t_parts.append(f"{asset}: {df['Target (%)'].iloc[i]:.1f}%")
             st.caption(f"**Current:** {' · '.join(w_parts)}")
             st.caption(f"**Target:** {' · '.join(t_parts)}")
         
@@ -542,6 +608,7 @@ def portfolio_builder(
             "Select assets",
             options=asset_options,
             default=current_selection,
+            format_func=lambda x: asset_display_map.get(x, x),  # Show "Name (Ticker)" in dropdown
             key=f"{key}_asset_select",
         )
         
@@ -560,25 +627,28 @@ def portfolio_builder(
         current_weights = {k: v for k, v in current_weights.items() if k in selected_assets}
         st.session_state[weights_key] = current_weights
         
-        # Display sliders for each asset
+        # Display sliders for each asset (selected_assets contains Short names)
         raw_weights: dict[str, float] = {}
         
         for asset in selected_assets:
-            # Extract just the asset name (before the ticker in parentheses) for compact display
-            asset_short = asset.split(" (")[0] if " (" in asset else asset
+            # asset is a Short name; get full Name for display
+            if asset in asset_mapping:
+                full_name, _ticker, _short = asset_mapping[asset]
+            else:
+                full_name = asset
             # Create a safe key from the asset name (remove special chars)
             safe_key = "".join(c if c.isalnum() else "_" for c in asset)
             
             col_name, col_slider = st.columns([2.5, 6.5])
             
             with col_name:
-                st.markdown(f"**{asset_short}**")
+                st.markdown(f"**{full_name}**")
             
             with col_slider:
                 # Use session state value as default
                 default_val = float(current_weights.get(asset, 10.0))
                 weight = st.slider(
-                    f"Weight for {asset_short}",
+                    f"Weight for {full_name}",
                     min_value=0.0,
                     max_value=100.0,
                     value=default_val,
@@ -602,27 +672,33 @@ def portfolio_builder(
         
         # Check if normalization was needed (sum != 100)
         if abs(total_raw - 100.0) > 0.5:
-            # Show warning with before → after for each asset
+            # Show warning with before → after for each asset (use full Name)
             change_lines = []
             for asset in selected_assets:
-                asset_short = asset.split(" (")[0] if " (" in asset else asset
-                change_lines.append(f"- {asset_short}: {raw_weights[asset]:.0f}% → {normalized_weights[asset]:.1f}%")
+                if asset in asset_mapping:
+                    full_name, _ticker, _short = asset_mapping[asset]
+                else:
+                    full_name = asset
+                change_lines.append(f"- {full_name}: {raw_weights[asset]:.0f}% → {normalized_weights[asset]:.1f}%")
             st.warning(
                 f"⚠️ Weights sum to **{total_raw:.0f}%** (not 100%). Normalizing automatically.\n\n"
                 + "\n".join(change_lines)
             )
         else:
-            # Display compact allocation summary (no normalization needed)
+            # Display compact allocation summary (no normalization needed, use full Name)
             alloc_parts = []
             for asset in selected_assets:
-                asset_short = asset.split(" (")[0] if " (" in asset else asset
-                alloc_parts.append(f"{asset_short}: **{normalized_weights[asset]:.1f}%**")
+                if asset in asset_mapping:
+                    full_name, _ticker, _short = asset_mapping[asset]
+                else:
+                    full_name = asset
+                alloc_parts.append(f"{full_name}: **{normalized_weights[asset]:.1f}%**")
             st.caption(" · ".join(alloc_parts))
         
         rows = []
         for asset in selected_assets:
             if asset in asset_mapping:
-                name, ticker = asset_mapping[asset]
+                name, ticker, _short = asset_mapping[asset]
                 rows.append({
                     "Asset": asset,
                     "Asset Name": name,
@@ -676,21 +752,21 @@ def _manual_portfolio_builder(
 
     portfolio_name = st.text_input("Portfolio name", value="My Portfolio", key=f"{key}_name")
 
-    # Load available assets for dropdown
-    asset_options, asset_mapping = _get_asset_options()
+    # Load available assets for dropdown (options are Short names)
+    asset_options, asset_mapping, asset_display_map = _get_asset_options()
     if not asset_options:
         st.error("No assets available. Check `cache/assets/list.json`.")
         return None
 
-    # Default selections: 60% Stocks, 40% Bonds (find by name prefix)
-    def _find_asset_by_prefix(opts: list[str], prefix: str) -> str:
+    # Default selections: 60% Stocks, 40% Bonds (find by Short name)
+    def _find_asset_by_short(opts: list[str], short_name: str) -> str:
         for opt in opts:
-            if opt.lower().startswith(prefix.lower()):
+            if opt.lower() == short_name.lower():
                 return opt
         return opts[0] if opts else ""
     
-    default_stocks = _find_asset_by_prefix(asset_options, "Stocks (")
-    default_bonds = _find_asset_by_prefix(asset_options, "Bonds (")
+    default_stocks = _find_asset_by_short(asset_options, "Stocks")
+    default_bonds = _find_asset_by_short(asset_options, "Bonds")
     # Fallback if not found
     if not default_stocks and asset_options:
         default_stocks = asset_options[0]
@@ -714,6 +790,7 @@ def _manual_portfolio_builder(
         "Select assets",
         options=asset_options,
         default=current_selection,
+        format_func=lambda x: asset_display_map.get(x, x),  # Show "Name (Ticker)" in dropdown
         key=f"{key}_asset_select",
     )
     
@@ -731,23 +808,27 @@ def _manual_portfolio_builder(
     current_weights = {k: v for k, v in current_weights.items() if k in selected_assets}
     st.session_state[weights_key] = current_weights
     
-    # Display sliders for each asset
+    # Display sliders for each asset (selected_assets contains Short names)
     raw_weights: dict[str, float] = {}
     
     for asset in selected_assets:
-        asset_short = asset.split(" (")[0] if " (" in asset else asset
+        # asset is a Short name; get full Name for display
+        if asset in asset_mapping:
+            full_name, _ticker, _short = asset_mapping[asset]
+        else:
+            full_name = asset
         # Create a safe key from the asset name (remove special chars)
         safe_key = "".join(c if c.isalnum() else "_" for c in asset)
         
         col_name, col_slider = st.columns([2.5, 6.5])
         
         with col_name:
-            st.markdown(f"**{asset_short}**")
+            st.markdown(f"**{full_name}**")
         
         with col_slider:
             default_val = float(current_weights.get(asset, 10.0))
             weight = st.slider(
-                f"Weight for {asset_short}",
+                f"Weight for {full_name}",
                 min_value=0.0,
                 max_value=100.0,
                 value=default_val,
@@ -769,29 +850,34 @@ def _manual_portfolio_builder(
     # Normalize weights to sum to 100 (round to 2 decimals)
     normalized_weights = {k: round(v / total_raw * 100.0, 2) for k, v in raw_weights.items()}
     
-    # Check if normalization was needed (sum != 100)
+    # Check if normalization was needed (sum != 100, use full Name)
     if abs(total_raw - 100.0) > 0.5:
-        # Show warning with before → after for each asset
         change_lines = []
         for asset in selected_assets:
-            asset_short = asset.split(" (")[0] if " (" in asset else asset
-            change_lines.append(f"- {asset_short}: {raw_weights[asset]:.0f}% → {normalized_weights[asset]:.1f}%")
+            if asset in asset_mapping:
+                full_name, _ticker, _short = asset_mapping[asset]
+            else:
+                full_name = asset
+            change_lines.append(f"- {full_name}: {raw_weights[asset]:.0f}% → {normalized_weights[asset]:.1f}%")
         st.warning(
             f"⚠️ Weights sum to **{total_raw:.0f}%** (not 100%). Normalizing automatically.\n\n"
             + "\n".join(change_lines)
         )
     else:
-        # Display compact allocation summary (no normalization needed)
+        # Display compact allocation summary (no normalization needed, use full Name)
         alloc_parts = []
         for asset in selected_assets:
-            asset_short = asset.split(" (")[0] if " (" in asset else asset
-            alloc_parts.append(f"{asset_short}: **{normalized_weights[asset]:.1f}%**")
+            if asset in asset_mapping:
+                full_name, _ticker, _short = asset_mapping[asset]
+            else:
+                full_name = asset
+            alloc_parts.append(f"{full_name}: **{normalized_weights[asset]:.1f}%**")
         st.caption(" · ".join(alloc_parts))
     
     rows = []
     for asset in selected_assets:
         if asset in asset_mapping:
-            name, ticker = asset_mapping[asset]
+            name, ticker, _short = asset_mapping[asset]
             rows.append({
                 "Asset": asset,
                 "Asset Name": name,
@@ -883,7 +969,8 @@ def _rolling_correlation_to_stocks(p: Portfolio, window_days: int = 252) -> pd.D
         if pair.empty:
             continue
         corr = pair.iloc[:, 0].rolling(window=window_days, min_periods=min_periods).corr(pair.iloc[:, 1])
-        corr_series.append(corr.rename(p._label(ticker)))
+        short_map = _get_short_name_map()
+        corr_series.append(corr.rename(short_map.get(ticker, ticker)))
 
     if not corr_series:
         return pd.DataFrame()
@@ -1106,19 +1193,26 @@ def _render_llm_query_ui(
 
 
 def _render_title() -> None:
+    # Use HTML to style the euro symbol with extra weight (font fallback makes it thinner)
+    # st.markdown(
+    #     '<h1 data-testid="stHeading" style="text-align: center;">CACH<span style="font-weight: 700;">€</span></h1>',
+    #     unsafe_allow_html=True,
+    # )
     st.markdown(
         """
-<div style="text-align:center; margin: 0.9rem 0 1.0rem 0;">
-  <div style="font-size: 3.0rem; font-weight: 750; letter-spacing: 0.02em; line-height: 1.0;">
-    CACH€ 
-  </div>
-  <div style="font-size: 1.55rem; font-weight: 600; letter-spacing: 0.01em; line-height: 1.1; margin-top: 0.35rem;">
-    Your financial assistant.
-  </div>
-</div>
-""",
+        <h1 data-testid="stHeading" style="text-align: center;">
+            CACH<span style="
+                font-weight: 700; 
+                display: inline-block; 
+                transform: scaleX(1.3); 
+                transform-origin: left;
+                margin-right: 0.1em;
+            ">€</span>
+        </h1>
+        """,
         unsafe_allow_html=True,
     )
+    st.subheader("Your financial assistant.")
 
 
 def _go(page: str) -> None:
@@ -1134,23 +1228,17 @@ _render_title()
 page = str(st.session_state.get("page", "home"))
 
 if page != "home":
-    c1, c2, c3 = st.columns([1.2, 8, 0.8])
+    c1, c2 = st.columns([1.5, 8.5])
     with c1:
-        if st.button("← Back", type="secondary", key="nav_back", use_container_width=False):
+        if st.button("← Back", type="secondary", key="nav_back", use_container_width=True):
             _go("home")
     st.markdown("")
 
 
 if page == "home":
-    st.markdown("")
-    st.markdown(
-        """
-<div style="text-align:center; font-size: 1.5rem; font-style: italic; font-weight: 600; letter-spacing: 0.01em; margin: 0 0 1.1rem 0;">
-  Hi, what do you need today?
-</div>
-""",
-        unsafe_allow_html=True,
-    )
+    st.subheader("Hi, what do you need today?")
+    # st.markdown("")
+    st.markdown("")  # Add spacing between question and buttons
     # Reserve space on both sides so the navigation buttons stay centered under the title.
     left, mid, right = st.columns([2.2, 3.6, 2.2])
     left.empty()
@@ -1164,9 +1252,35 @@ if page == "home":
             _go("rebalance")
         if st.button("What-if: add an asset", type="primary", key="nav_whatif", use_container_width=True):
             _go("whatif")
+    
+    # Global help section
+#     st.markdown("")
+#     with st.expander("ℹ️ What can this app do?", expanded=False):
+#         st.markdown("""
+# **Analyze a portfolio** — Evaluate a single portfolio's historical performance. See key metrics like CAGR, volatility, Sharpe ratio, and max drawdown. Visualize how your portfolio would have grown over time and understand correlations between assets.
+
+# **Compare portfolios** — Put multiple portfolios side-by-side to see which performed better historically. Useful for evaluating different allocation strategies (e.g., 60/40 vs 80/20) or comparing your portfolio against benchmarks.
+
+# **Rebalance with new cash** — Calculate how to allocate new money to bring your portfolio back to target weights without selling. Includes macro-economic context and optional AI-assisted recommendations.
+
+# **What-if: add an asset** — Explore what would happen if you added a new asset to your portfolio. Analyze diversification benefits, risk-adjusted returns, and backtest the modified portfolio against your baseline.
+#         """)
 
 
 elif page == "analyze":
+    with st.expander("ℹ️ About this section", expanded=False):
+        st.markdown("""
+This section analyzes a single portfolio's historical performance using backtesting.
+
+**What you'll get:**
+- **Key metrics**: CAGR, volatility, Sharpe/Sortino ratios, max drawdown, and Ulcer Index
+- **Value chart**: How your portfolio would have grown over your selected time period
+- **Asset trajectories**: Individual performance of each asset in your portfolio
+- **Correlation analysis**: Rolling 1-year correlation of each asset vs. stocks, helping you understand diversification
+
+**How to use:** Create a portfolio using the sliders or load a pre-built one, adjust the backtest settings (rebalancing frequency, date range), then click "Run analysis".
+        """)
+    
     p, _ = portfolio_builder(key="analyze", title="Portfolio", allow_value=False)
     if p is not None:
         st.markdown("### Settings")
@@ -1258,16 +1372,17 @@ elif page == "analyze":
 
                     stats = Portfolio.backtest_stats(value_series, rf_annual=float(rf_annual))
 
-                    # Compute asset values on filtered range
+                    # Compute asset values on filtered range (use Short names for chart labels)
+                    short_map = _get_short_name_map()
                     asset_values = float(initial_amount) * (prices_filtered / prices_filtered.iloc[0])
-                    asset_values = asset_values.rename(columns={t: p._label(t) for t in asset_values.columns})
+                    asset_values = asset_values.rename(columns={t: short_map.get(t, t) for t in asset_values.columns})
 
                     # Compute correlations (uses external stocks data if no stocks in portfolio)
                     corr_df = _rolling_correlation_to_stocks(p)
                     if user_start and user_end and not corr_df.empty:
                         corr_df = corr_df.loc[str(user_start):str(user_end)]
 
-                    # Build allocation data
+                    # Build allocation data (use full names for pie chart legend)
                     labels = [p._label(t) for t in target_weights_pct.keys()]
                     sizes = [float(target_weights_pct[t]) for t in target_weights_pct.keys()]
                     legend_labels = [f"{label} ({weight:.1f}%)" for label, weight in zip(labels, sizes)]
@@ -1310,7 +1425,7 @@ elif page == "analyze":
             ulcer_display = f"{ulcer:.2f}" if np.isfinite(ulcer) else "—"
             m6.metric("Ulcer Index", ulcer_display)
 
-            with st.expander("What do these metrics mean?", expanded=False):
+            with st.expander("ℹ️ What do these metrics mean?", expanded=False):
                 st.markdown("""
 **CAGR (Compound Annual Growth Rate)** — The average annual return assuming profits are reinvested. A 10% CAGR means the portfolio grew by 10% per year on average.
 
@@ -1330,20 +1445,22 @@ elif page == "analyze":
             st.markdown("#### Target allocation")
             pie = (
                 alt.Chart(alloc_df)
-                .mark_arc(innerRadius=40, stroke="#0e1117", strokeWidth=1.4)
+                .mark_arc(innerRadius=50, stroke="#0e1117", strokeWidth=1.4)
                 .encode(
                     theta=alt.Theta("Weight (%):Q", title="Weight (%)"),
-                    color=alt.Color("Legend:N", title="Allocation"),
+                    color=alt.Color(
+                        "Legend:N",
+                        title="Allocation",
+                        legend=alt.Legend(labelLimit=400),  # Allow longer legend labels
+                    ),
                     tooltip=[
                         alt.Tooltip("Asset:N", title="Asset"),
                         alt.Tooltip("Weight (%):Q", title="Weight (%)", format=".1f"),
                     ],
                 )
-                .properties(width=360, height=360)
+                .properties(width=280, height=280)
             )
-            pie_left, pie_center, pie_right = st.columns([1.2, 1, 1.2])
-            with pie_center:
-                st.altair_chart(pie, use_container_width=False)
+            st.altair_chart(pie, width="stretch")
 
             if show_chart:
                 y_scale_type = "log" if y_scale == "Logarithmic" else "linear"
@@ -1362,7 +1479,7 @@ elif page == "analyze":
                         alt.Tooltip("Value:Q", title="Value (EUR)", format=",.2f"),
                     ],
                 ).properties(height=320).interactive()
-                st.altair_chart(chart_value, use_container_width=True)
+                st.altair_chart(chart_value, width="stretch")
 
                 # Asset value trajectories
                 asset_values = results["asset_values"]
@@ -1400,7 +1517,7 @@ elif page == "analyze":
                             .properties(height=320)
                             .interactive()
                         )
-                        st.altair_chart(chart_assets, use_container_width=True)
+                        st.altair_chart(chart_assets, width="stretch")
                     else:
                         st.info("Select at least one asset to display the chart.")
                 else:
@@ -1446,11 +1563,11 @@ elif page == "analyze":
                         zero_line = alt.Chart(pd.DataFrame({"y": [0]})).mark_rule(color="#bbbbbb", strokeDash=[4, 4]).encode(
                             y="y"
                         )
-                        st.altair_chart((corr_chart + zero_line).interactive(), use_container_width=True)
+                        st.altair_chart((corr_chart + zero_line).interactive(), width="stretch")
                     else:
                         st.info("Select at least one asset to display the chart.")
                     
-                    with st.expander("What does this chart show?", expanded=False):
+                    with st.expander("ℹ️ What does this chart show?", expanded=False):
                         st.markdown("""
 This chart shows how each non-stock asset's returns have moved relative to your stock allocation over rolling 1-year windows.
 
@@ -1471,6 +1588,18 @@ This chart shows how each non-stock asset's returns have moved relative to your 
 
 
 elif page == "compare":
+    with st.expander("ℹ️ About this section", expanded=False):
+        st.markdown("""
+This section compares multiple portfolios side-by-side using the same time period and settings.
+
+**What you'll get:**
+- **Allocation overview**: A table showing how each portfolio is allocated across assets
+- **Performance comparison**: Key metrics (CAGR, volatility, Sharpe, max drawdown, etc.) for each portfolio
+- **Value chart**: All portfolios on the same chart so you can visually compare growth trajectories
+
+**How to use:** Select built-in portfolios, upload your own JSON files, or create manual portfolios using sliders. All portfolios will be compared over their common date range. Adjust settings like rebalancing frequency, then click "Run comparison".
+        """)
+    
     st.markdown("### Portfolios to compare")
 
     portfolios_dir = os.path.join(CACHE_DIR, "portfolios")
@@ -1672,23 +1801,23 @@ elif page == "compare":
 
                 df = pd.DataFrame(rows).set_index("Portfolio")
 
-                # Build allocation overview table
+                # Build allocation overview table (using Short names)
                 st.markdown("### Allocation overview")
+                short_map = _get_short_name_map()
                 all_asset_names: set[str] = set()
                 portfolio_allocations: dict[str, dict[str, float]] = {}
                 for name, p in all_portfolios:
-                    assets_map = getattr(p, "assets", {})
                     target_weights = getattr(p, "target_weights_pct", {})
                     alloc: dict[str, float] = {}
                     for ticker in p.tickers:
-                        asset_name = assets_map.get(ticker, ticker)
+                        short_name = short_map.get(ticker, ticker)
                         weight = float(target_weights.get(ticker, 0.0))
                         # If same asset name appears multiple times, sum the weights
-                        alloc[asset_name] = alloc.get(asset_name, 0.0) + weight
-                        all_asset_names.add(asset_name)
+                        alloc[short_name] = alloc.get(short_name, 0.0) + weight
+                        all_asset_names.add(short_name)
                     portfolio_allocations[name] = alloc
 
-                # Build allocation DataFrame
+                # Build allocation DataFrame (transposed: assets as rows, portfolios as columns)
                 sorted_asset_names = sorted(all_asset_names)
                 alloc_rows = []
                 for name, alloc in portfolio_allocations.items():
@@ -1698,22 +1827,24 @@ elif page == "compare":
                         row[asset_name] = f"{weight:.1f}%"
                     alloc_rows.append(row)
                 alloc_df = pd.DataFrame(alloc_rows).set_index("Portfolio")
-                st.dataframe(alloc_df, use_container_width=True)
+                st.dataframe(alloc_df.T, width="stretch")
 
                 st.markdown("### Results")
                 st.caption(f"Comparison period: {start_date} → {end_date}")
 
-                # Format and display statistics table with % symbols
+                # Format and display statistics table with % symbols (transposed: metrics as rows)
+                # Convert all values to strings to avoid Arrow serialization issues with mixed types
                 pretty = df.copy()
                 pct_cols = ["Total Return", "CAGR", "Vol (ann.)", "Max Drawdown"]
                 for c in pct_cols:
                     pretty[c] = (pretty[c].astype(float) * 100.0).round(2).astype(str) + "%"
-                # Format Ulcer Index (not a percentage)
-                pretty["Ulcer Index"] = pretty["Ulcer Index"].astype(float).round(2)
-                pretty[["Sharpe", "Sortino"]] = pretty[["Sharpe", "Sortino"]].astype(float).round(2)
-                st.dataframe(pretty, use_container_width=True)
+                # Format Ulcer Index (not a percentage) - convert to string
+                pretty["Ulcer Index"] = pretty["Ulcer Index"].astype(float).round(2).astype(str)
+                pretty["Sharpe"] = pretty["Sharpe"].astype(float).round(2).astype(str)
+                pretty["Sortino"] = pretty["Sortino"].astype(float).round(2).astype(str)
+                st.dataframe(pretty.T, width="stretch")
 
-                with st.expander("What do these metrics mean?", expanded=False):
+                with st.expander("ℹ️ What do these metrics mean?", expanded=False):
                     st.markdown("""
 **Total Return** — Cumulative gain/loss over the entire period. A 50% total return means €10,000 became €15,000.
 
@@ -1759,13 +1890,26 @@ elif page == "compare":
                     .properties(height=400)
                     .interactive()
                 )
-                st.altair_chart(chart, use_container_width=True)
+                st.altair_chart(chart, width="stretch")
 
             except Exception as e:
                 st.error(str(e))
 
 
 elif page == "rebalance":
+    with st.expander("ℹ️ About this section", expanded=False):
+        st.markdown("""
+This section helps you allocate new cash to your portfolio to move closer to your target weights—without selling any existing positions.
+
+**What you'll get:**
+- **Rebalancing actions**: How much to invest in each asset to minimize deviation from targets
+- **Portfolio diagnostics**: Recent performance metrics, volatility, and correlations for each asset
+- **Macro overview**: Current interest rates, inflation, and yield data for context
+- **AI assistance**: Generate a prompt for an LLM to get personalized rebalancing advice
+
+**How to use:** Enter your current portfolio with both current weights (what you have now) and target weights (what you want). Specify your current portfolio value and the new cash amount, then click "Compute rebalance".
+        """)
+    
     p, _ = portfolio_builder(key="rebalance", title="Portfolio", allow_value=True)
     if p is not None:
         st.markdown("### Settings")
@@ -1785,7 +1929,9 @@ elif page == "rebalance":
 
                     table = p.rebalance(float(new_cash))
                     table_transposed = table.T
-                    table_transposed.columns = [p._label(t) if hasattr(p, "_label") else t for t in table_transposed.columns]
+                    short_map = _get_short_name_map()
+                    # Use tickers to look up Short names (table columns are labels, not tickers)
+                    table_transposed.columns = [short_map.get(t, table_transposed.columns[i]) for i, t in enumerate(p.tickers)]
 
                     diag = None
                     diag_transposed = None
@@ -1793,7 +1939,8 @@ elif page == "rebalance":
                     try:
                         diag = compute_rebalancing_diagnostics(p)
                         diag_transposed = diag.T
-                        diag_transposed.columns = [p._label(t) if hasattr(p, "_label") else t for t in diag_transposed.columns]
+                        # Use tickers to look up Short names (diag columns are labels, not tickers)
+                        diag_transposed.columns = [short_map.get(t, diag_transposed.columns[i]) for i, t in enumerate(p.tickers)]
                     except Exception as e:
                         diag_error = str(e)
 
@@ -1914,7 +2061,7 @@ elif page == "rebalance":
                 deviation_data = None
             
             # Show table first, then chart below
-            st.dataframe(table_t.round(2), use_container_width=True)
+            st.dataframe(table_t.round(2), width="stretch")
             
             if deviation_data is not None and not deviation_data.empty:
                 st.markdown("#### Deviation from target")
@@ -1943,10 +2090,10 @@ elif page == "rebalance":
                 zero_line = alt.Chart(pd.DataFrame({"x": [0]})).mark_rule(
                     color="#888888", strokeDash=[4, 4]
                 ).encode(x="x:Q")
-                st.altair_chart((deviation_chart + zero_line), use_container_width=True)
+                st.altair_chart((deviation_chart + zero_line), width="stretch")
                 st.caption("🔴 Overweight | 🟢 Underweight")
             
-            with st.expander("How to read this", expanded=False):
+            with st.expander("ℹ️ How to read this", expanded=False):
                 st.markdown("""
 **Table rows:**
 
@@ -1965,9 +2112,9 @@ The algorithm prioritizes underweight assets while ensuring no selling is requir
 
             if results["diag_transposed"] is not None:
                 st.markdown("### Portfolio diagnostics")
-                st.dataframe(results["diag_transposed"], use_container_width=True)
+                st.dataframe(results["diag_transposed"], width="stretch")
                 
-                with st.expander("What do these diagnostics mean?", expanded=False):
+                with st.expander("ℹ️ What do these diagnostics mean?", expanded=False):
                     st.markdown("""
 These diagnostics help you understand recent portfolio behavior over the last ~12 months.
 
@@ -2000,7 +2147,7 @@ These diagnostics help you understand recent portfolio behavior over the last ~1
                     st.metric("DE 10Y Real Yield (proxy)", f"{snap.de_10y_real_yield_proxy_pct:.2f}%")
                     st.metric("Global Earnings Yield Est.", f"{snap.global_earnings_yield_est_pct:.2f}%")
                 
-                with st.expander("What do these indicators mean?", expanded=False):
+                with st.expander("ℹ️ What do these indicators mean?", expanded=False):
                     st.markdown("""
 These macro indicators provide context for investment decisions.
 
@@ -2038,7 +2185,7 @@ These macro indicators provide context for investment decisions.
                         .properties(height=300)
                         .interactive()
                     )
-                    st.altair_chart(macro_chart, use_container_width=True)
+                    st.altair_chart(macro_chart, width="stretch")
             else:
                 st.warning("Could not fetch macro data. Check your FRED API key.")
 
@@ -2066,6 +2213,19 @@ These macro indicators provide context for investment decisions.
 
 
 elif page == "whatif":
+    with st.expander("ℹ️ About this section", expanded=False):
+        st.markdown("""
+This section explores what would happen if you added a new asset to your portfolio by swapping a portion of an existing position.
+
+**What you'll get:**
+- **Diversification analysis**: Correlations, volatility impact, and how well candidates diversify your portfolio
+- **RRR analysis**: Return-to-Risk Ratio test based on portfolio theory—does the new asset clear the "no-harm" hurdle?
+- **Backtest comparison**: Side-by-side performance of your baseline vs. each modified portfolio
+- **AI assistance**: Generate a prompt for an LLM to help interpret the results
+
+**How to use:** Create your base portfolio, select candidate assets to evaluate, choose which position to fund from and by how much, then click "Run what-if".
+        """)
+    
     p, _ = portfolio_builder(key="whatif", title="Base portfolio", allow_value=False)
     if p is not None:
         # Load predefined candidate assets
@@ -2088,26 +2248,28 @@ elif page == "whatif":
         ]
 
         # Initialize variables
-        candidate_options: dict[str, str] = {}
-        selected_candidate_names: list[str] = []
-        candidate_ticker_to_name: dict[str, str] = {}
+        candidate_short_to_ticker: dict[str, str] = {}  # Short name -> ticker
+        candidate_short_to_display: dict[str, str] = {}  # Short name -> "Name (Ticker)"
+        selected_candidate_shorts: list[str] = []
 
         if not filtered_candidates:
             st.info("All predefined candidate assets are already in the portfolio.")
         else:
-            # Build options for multiselect: display name, store ticker
-            candidate_options = {asset["Name"]: asset["Ticker"] for asset in filtered_candidates}
-            # Sort candidate names alphabetically (case-insensitive)
-            sorted_candidate_names = sorted(candidate_options.keys(), key=lambda x: x.lower())
-            selected_candidate_names = st.multiselect(
+            # Build options using Short names as values, with display mapping
+            for asset in filtered_candidates:
+                short = asset.get("Short", asset["Name"])
+                candidate_short_to_ticker[short] = asset["Ticker"]
+                candidate_short_to_display[short] = f"{asset['Name']} ({asset['Ticker']})"
+            # Sort options alphabetically by Short name (case-insensitive)
+            sorted_candidate_shorts = sorted(candidate_short_to_ticker.keys(), key=lambda x: x.lower())
+            selected_candidate_shorts = st.multiselect(
                 "Candidate assets to evaluate",
-                options=sorted_candidate_names,
+                options=sorted_candidate_shorts,
                 default=[],
+                format_func=lambda x: candidate_short_to_display.get(x, x),  # Show "Name (Ticker)" in dropdown
                 key="whatif_candidates",
                 help="Select one or more assets to analyze for potential inclusion in your portfolio.",
             )
-            # Build mapping from ticker to name for display purposes
-            candidate_ticker_to_name = {asset["Ticker"]: asset["Name"] for asset in filtered_candidates}
 
         # Get available assets with their weights for the source selection
         assets_map = getattr(p, "assets", {})
@@ -2191,11 +2353,13 @@ elif page == "whatif":
             with st.spinner("Running what-if analysis..."):
                 try:
                     # Get selected candidates (tickers) from multiselect
-                    if not filtered_candidates or not selected_candidate_names:
+                    if not filtered_candidates or not selected_candidate_shorts:
                         raise ValueError("No candidate assets selected. Please select at least one asset.")
 
-                    candidates = [candidate_options[name] for name in selected_candidate_names]
-                    candidate_name_map = {candidate_options[name]: name for name in selected_candidate_names}
+                    # Extract tickers from Short names
+                    candidates = [candidate_short_to_ticker[short] for short in selected_candidate_shorts]
+                    # Build mapping from ticker to Short name for display
+                    candidate_name_map = {candidate_short_to_ticker[short]: short for short in selected_candidate_shorts}
 
                     if source_ticker is None:
                         raise ValueError("No source asset selected.")
@@ -2253,8 +2417,9 @@ elif page == "whatif":
                         scores_display.index = [candidate_name_map.get(t, t) for t in scores_display.index]
                         pct_cols = ["delta_vol_if_swap", "delta_max_drawdown_if_swap", "cand_vol_ann"]
                         
-                        # Transform max_abs_corr_offender: "TICKER (+0.XXX)" -> "Asset Name"
-                        def _offender_to_name(val: str) -> str:
+                        # Transform max_abs_corr_offender: "TICKER (+0.XXX)" -> "Short Name"
+                        short_map = _get_short_name_map()
+                        def _offender_to_short(val: str) -> str:
                             if not val or not isinstance(val, str):
                                 return "—"
                             # Extract ticker (everything before " (")
@@ -2262,11 +2427,11 @@ elif page == "whatif":
                                 ticker = val.split(" (")[0].strip()
                             else:
                                 ticker = val.strip()
-                            # Look up asset name
-                            return assets_map.get(ticker, ticker)
+                            # Look up short name
+                            return short_map.get(ticker, ticker)
                         
                         if "max_abs_corr_offender" in scores_display.columns:
-                            scores_display["max_abs_corr_offender"] = scores_display["max_abs_corr_offender"].apply(_offender_to_name)
+                            scores_display["max_abs_corr_offender"] = scores_display["max_abs_corr_offender"].apply(_offender_to_short)
                         
                         for col in scores_display.columns:
                             if col == "max_abs_corr_offender":
@@ -2386,14 +2551,14 @@ elif page == "whatif":
 
                         df = pd.DataFrame(rows).set_index("Portfolio")
                         backtest_df = pd.DataFrame(index=df.index)
-                        # Format percentage columns with % in cell values (matching comparison section)
+                        # Format all columns as strings to avoid Arrow serialization issues with mixed types
                         backtest_df["Total Return"] = (df["total_return"].astype(float) * 100.0).round(2).astype(str) + "%"
                         backtest_df["CAGR"] = (df["cagr"].astype(float) * 100.0).round(2).astype(str) + "%"
                         backtest_df["Vol (ann.)"] = (df["vol_annual"].astype(float) * 100.0).round(2).astype(str) + "%"
-                        backtest_df["Sharpe"] = df["sharpe"].astype(float).round(2)
-                        backtest_df["Sortino"] = df["sortino"].astype(float).round(2)
+                        backtest_df["Sharpe"] = df["sharpe"].astype(float).round(2).astype(str)
+                        backtest_df["Sortino"] = df["sortino"].astype(float).round(2).astype(str)
                         backtest_df["Max Drawdown"] = (df["max_drawdown"].astype(float) * 100.0).round(2).astype(str) + "%"
-                        backtest_df["Ulcer Index"] = df["ulcer_index"].astype(float).round(2)
+                        backtest_df["Ulcer Index"] = df["ulcer_index"].astype(float).round(2).astype(str)
                         llm_backtest_df = backtest_df
 
                     # Generate LLM prompt
@@ -2444,9 +2609,9 @@ elif page == "whatif":
             # Diversification scores table
             if results["scores_transposed"] is not None:
                 st.markdown("### Diversification analysis")
-                st.dataframe(results["scores_transposed"], use_container_width=True)
+                st.dataframe(results["scores_transposed"], width="stretch")
                 
-                with st.expander("What do these metrics mean?", expanded=False):
+                with st.expander("ℹ️ What do these metrics mean?", expanded=False):
                     st.markdown("""
 This table shows how each candidate asset relates to your existing portfolio.
 
@@ -2473,9 +2638,9 @@ This table shows how each candidate asset relates to your existing portfolio.
             st.markdown("### Return-to-Risk Ratio (RRR) analysis")
 
             if results["rrr_transposed"] is not None:
-                st.dataframe(results["rrr_transposed"], use_container_width=True)
+                st.dataframe(results["rrr_transposed"], width="stretch")
                 
-                with st.expander("What is RRR analysis?", expanded=False):
+                with st.expander("ℹ️ What is RRR analysis?", expanded=False):
                     st.markdown("""
 **RRR (Return-to-Risk Ratio)** analysis is based on the "Portfolio Intuition" paper (Kennedy, 2018).
 
@@ -2498,12 +2663,12 @@ This table shows how each candidate asset relates to your existing portfolio.
             else:
                 st.info("Could not compute RRR metrics (insufficient data or portfolio returns unavailable).")
 
-            # Backtest comparison table
+            # Backtest comparison table (transposed: metrics as rows)
             if results["backtest_df"] is not None:
                 st.markdown("### Backtest comparison")
-                st.dataframe(results["backtest_df"], use_container_width=True)
+                st.dataframe(results["backtest_df"].T, width="stretch")
                 
-                with st.expander("What do these metrics mean?", expanded=False):
+                with st.expander("ℹ️ What do these metrics mean?", expanded=False):
                     st.markdown("""
 This table compares historical performance between your baseline portfolio and portfolios with each candidate asset added.
 
@@ -2528,10 +2693,14 @@ This table compares historical performance between your baseline portfolio and p
                 value_series = results.get("value_series", {})
                 if value_series:
                     st.markdown("#### Portfolio value over time")
+                    # Build chart data with Baseline first for legend ordering
                     chart_data = []
-                    for name, v in value_series.items():
-                        for date, value in v.items():
-                            chart_data.append({"Date": date, "Portfolio": name, "Value": float(value)})
+                    # Process Baseline first, then other portfolios
+                    portfolio_order = ["Baseline"] + [n for n in value_series.keys() if n != "Baseline"]
+                    for name in portfolio_order:
+                        if name in value_series:
+                            for date, value in value_series[name].items():
+                                chart_data.append({"Date": date, "Portfolio": name, "Value": float(value)})
                     chart_df = pd.DataFrame(chart_data)
 
                     y_scale_type = "log" if y_scale == "Logarithmic" else "linear"
@@ -2541,7 +2710,7 @@ This table compares historical performance between your baseline portfolio and p
                         .encode(
                             x=alt.X("Date:T", title="Date", axis=alt.Axis(format="%m/%Y")),
                             y=alt.Y("Value:Q", title="Value (normalized)", scale=alt.Scale(type=y_scale_type)),
-                            color=alt.Color("Portfolio:N", title="Portfolio"),
+                            color=alt.Color("Portfolio:N", title="Portfolio", sort=portfolio_order),
                             tooltip=[
                                 alt.Tooltip("Date:T", title="Date"),
                                 alt.Tooltip("Portfolio:N", title="Portfolio"),
@@ -2551,7 +2720,7 @@ This table compares historical performance between your baseline portfolio and p
                         .properties(height=400)
                         .interactive()
                     )
-                    st.altair_chart(chart, use_container_width=True)
+                    st.altair_chart(chart, width="stretch")
 
             # AI-Assisted Analysis section (combined prompt + query)
             if results["llm_prompt"]:

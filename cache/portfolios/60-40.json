@@ -4,12 +4,14 @@
     {
       "Name": "Stocks",
       "Ticker": "ACWE.MI",
+      "Short": "Stocks",
       "Weight": 65.0,
       "Target": 60.0
     },
     {
       "Name": "Bonds",
       "Ticker": "AGGH.MI",
+      "Short": "Bonds",
       "Weight": 35.0,
       "Target": 40.0
     }

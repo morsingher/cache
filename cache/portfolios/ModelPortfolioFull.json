@@ -4,36 +4,42 @@
         {
             "Name": "Stocks",
             "Ticker": "ACWE.MI",
+            "Short": "Stocks",
             "Weight": 71.14,
             "Target": 60.0
         },
         {
             "Name": "Bonds",
             "Ticker": "AGGH.MI",
+            "Short": "Bonds",
             "Weight": 19.87,
             "Target": 20.0
         },
         {
             "Name": "Gold",
             "Ticker": "SGLD.MI",
+            "Short": "Gold",
             "Weight": 4.42,
             "Target": 5.0
         },
         {
             "Name": "Crypto BTC",
             "Ticker": "BTC-EUR",
+            "Short": "BTC",
             "Weight": 4.57,
             "Target": 5.0
         },
         {
             "Name": "Managed Futures",
             "Ticker": "DBMF",
+            "Short": "Man. Futures",
             "Weight": 0.0,
             "Target": 5.0
         },
         {
             "Name": "Commodity Carry",
             "Ticker": "UEQC.DE",
+            "Short": "Comm. Carry",
             "Weight": 0.0,
             "Target": 5.0
         }
