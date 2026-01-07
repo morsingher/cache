@@ -467,13 +467,63 @@ def portfolio_builder(
         df["Asset Name"] = asset_names
         df["Ticker"] = tickers
         
-        normalize = st.checkbox("Auto-normalize weights to sum to 100", value=True, key=f"{key}_normalize")
-        try:
-            w_sum = float(pd.to_numeric(df["Weight (%)"], errors="coerce").sum())
-            t_sum = float(pd.to_numeric(df["Target (%)"], errors="coerce").sum())
-            st.caption(f"Current weights sum: {w_sum:.3f} | Target weights sum: {t_sum:.3f}")
-        except Exception:
-            pass
+        # Calculate sums and check if normalization is needed
+        df["Weight (%)"] = pd.to_numeric(df["Weight (%)"], errors="coerce")
+        df["Target (%)"] = pd.to_numeric(df["Target (%)"], errors="coerce")
+        w_sum = float(df["Weight (%)"].sum())
+        t_sum = float(df["Target (%)"].sum())
+        
+        # Check if normalization is needed for Weight (%)
+        if w_sum > 0 and abs(w_sum - 100.0) > 0.5:
+            # Normalize and show warning
+            raw_weights = df["Weight (%)"].tolist()
+            df["Weight (%)"] = df["Weight (%)"] / w_sum * 100.0
+            df["Weight (%)"] = df["Weight (%)"].round(2)
+            
+            change_lines = []
+            for i, asset in enumerate(df["Asset"].tolist()):
+                if pd.notna(asset) and asset:
+                    asset_short = asset.split(" (")[0] if " (" in str(asset) else str(asset)
+                    change_lines.append(f"- {asset_short}: {raw_weights[i]:.0f}% → {df['Weight (%)'].iloc[i]:.1f}%")
+            st.warning(
+                f"⚠️ **Current weights** sum to **{w_sum:.0f}%** (not 100%). Normalizing automatically.\n\n"
+                + "\n".join(change_lines)
+            )
+        elif w_sum > 0:
+            df["Weight (%)"] = df["Weight (%)"].round(2)
+        
+        # Check if normalization is needed for Target (%)
+        if t_sum > 0 and abs(t_sum - 100.0) > 0.5:
+            # Normalize and show warning
+            raw_targets = df["Target (%)"].tolist()
+            df["Target (%)"] = df["Target (%)"] / t_sum * 100.0
+            df["Target (%)"] = df["Target (%)"].round(2)
+            
+            change_lines = []
+            for i, asset in enumerate(df["Asset"].tolist()):
+                if pd.notna(asset) and asset:
+                    asset_short = asset.split(" (")[0] if " (" in str(asset) else str(asset)
+                    change_lines.append(f"- {asset_short}: {raw_targets[i]:.0f}% → {df['Target (%)'].iloc[i]:.1f}%")
+            st.warning(
+                f"⚠️ **Target weights** sum to **{t_sum:.0f}%** (not 100%). Normalizing automatically.\n\n"
+                + "\n".join(change_lines)
+            )
+        elif t_sum > 0:
+            df["Target (%)"] = df["Target (%)"].round(2)
+        
+        # Show normalized allocation summary
+        if w_sum > 0 and t_sum > 0:
+            w_parts = []
+            t_parts = []
+            for i, asset in enumerate(df["Asset"].tolist()):
+                if pd.notna(asset) and asset:
+                    asset_short = asset.split(" (")[0] if " (" in str(asset) else str(asset)
+                    w_parts.append(f"{asset_short}: {df['Weight (%)'].iloc[i]:.1f}%")
+                    t_parts.append(f"{asset_short}: {df['Target (%)'].iloc[i]:.1f}%")
+            st.caption(f"**Current:** {' · '.join(w_parts)}")
+            st.caption(f"**Target:** {' · '.join(t_parts)}")
+        
+        normalize = True  # Always normalize in table mode now
     else:
         # === SLIDER-BASED UI FOR ANALYZE/COMPARE/WHATIF ===
         # Initialize session state for this portfolio builder
