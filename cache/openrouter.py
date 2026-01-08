@@ -135,6 +135,36 @@ def chat_completion(
     Returns:
         ChatResponse with content or error.
     """
+    return chat_completion_messages(
+        messages=[{"role": "user", "content": prompt}],
+        model=model,
+        api_key=api_key,
+        max_tokens=max_tokens,
+        temperature=temperature,
+    )
+
+
+def chat_completion_messages(
+    messages: list[dict[str, str]],
+    model: str = "meta-llama/llama-3.3-70b-instruct:free",
+    api_key: str | None = None,
+    max_tokens: int = 4000,
+    temperature: float = 0.7,
+) -> ChatResponse:
+    """
+    Run a multi-turn chat completion via OpenRouter.
+    
+    Args:
+        messages: List of message dicts with "role" and "content" keys.
+                  Roles can be "system", "user", or "assistant".
+        model: Model ID to use.
+        api_key: OpenRouter API key (uses env var if not provided).
+        max_tokens: Maximum tokens in the response.
+        temperature: Sampling temperature.
+    
+    Returns:
+        ChatResponse with content or error.
+    """
     if OpenAI is None:
         return ChatResponse(
             content="",
@@ -161,7 +191,7 @@ def chat_completion(
         
         response = client.chat.completions.create(
             model=model,
-            messages=[{"role": "user", "content": prompt}],
+            messages=messages,
             max_tokens=max_tokens,
             temperature=temperature,
         )

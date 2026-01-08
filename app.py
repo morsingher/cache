@@ -81,6 +81,7 @@ from openrouter import (  # noqa: E402
     fetch_free_models,
     fetch_limits,
     chat_completion,
+    chat_completion_messages,
     get_api_key,
     DEFAULT_FREE_MODELS,
 )
@@ -1099,14 +1100,17 @@ def _render_llm_query_ui(
     title: str = "Ask an LLM",
 ) -> None:
     """
-    Render a reusable LLM query UI component.
+    Render a reusable interactive LLM chat UI component.
+    
+    The first message is the built prompt and the first response comes from the LLM.
+    After that, the user can continue the conversation interactively.
     
     Includes:
     - API key check
     - Model selection (free models only)
     - Usage/limits display
-    - Query button
-    - Response display
+    - Start chat button (for initial query)
+    - Interactive chat interface with message history
     """
     if title:
         st.markdown(f"### {title}")
@@ -1119,6 +1123,13 @@ def _render_llm_query_ui(
             "Please set it to use LLM features."
         )
         return
+    
+    # Session state keys for this chat instance
+    chat_history_key = f"{key_prefix}_chat_history"
+    chat_started_key = f"{key_prefix}_chat_started"
+    chat_model_key = f"{key_prefix}_chat_model"
+    total_tokens_key = f"{key_prefix}_total_tokens"
+    chat_error_key = f"{key_prefix}_chat_error"  # Track last error separately
     
     # Fetch and display limits
     with st.expander("API Usage and Limits", expanded=False):
@@ -1175,12 +1186,16 @@ def _render_llm_query_ui(
     if default_model in free_models:
         default_idx = free_models.index(default_model)
     
+    # Disable model selection once chat has started
+    chat_started = st.session_state.get(chat_started_key, False)
+    
     selected_model = st.selectbox(
         "Select model (free tier only)",
         options=free_models,
         index=default_idx,
         key=f"{key_prefix}_model_select",
         help="All listed models are free to use. Some may have daily usage limits.",
+        disabled=chat_started,
     )
     
     # Initialize advanced settings in session state with defaults if not present
@@ -1203,6 +1218,7 @@ def _render_llm_query_ui(
                 step=500,
                 key=max_tokens_key,
                 help="Maximum number of tokens in the LLM response. Higher = longer responses.",
+                disabled=chat_started,
             )
             st.slider(
                 "Temperature",
@@ -1212,64 +1228,153 @@ def _render_llm_query_ui(
                 step=0.1,
                 key=temperature_key,
                 help="Higher = more creative, lower = more focused/deterministic.",
+                disabled=chat_started,
             )
     
-    # Track if a query is in progress to prevent UI issues
-    querying_key = f"{key_prefix}_querying"
+    # If chat hasn't started yet, show the "Start Chat" button
+    if not chat_started:
+        col1, col2 = st.columns([1, 1])
+        with col1:
+            if st.button("Start Chat with LLM", type="primary", key=f"{key_prefix}_start_chat_btn"):
+                # Initialize chat history with the built prompt as the first user message
+                st.session_state[chat_history_key] = [
+                    {"role": "user", "content": llm_prompt}
+                ]
+                st.session_state[chat_started_key] = True
+                st.session_state[chat_model_key] = selected_model
+                st.session_state[total_tokens_key] = 0
+                st.rerun()
+        with col2:
+            # Show a hint about what will happen
+            st.caption("Click to send the analysis prompt and start an interactive conversation.")
+        return
     
-    # Query button
-    if st.button("Query LLM", type="primary", key=f"{key_prefix}_query_btn", disabled=st.session_state.get(querying_key, False)):
-        st.session_state[querying_key] = True
-        
-        # Get values from session state (not local variables)
-        max_tokens_val = st.session_state.get(max_tokens_key, 4000)
-        temperature_val = st.session_state.get(temperature_key, 0.7)
-        
-        # Use st.status() for better loading feedback
-        with st.status(f"Querying {selected_model}...", expanded=True) as status:
-            query_start = time.time()
-            step_ph = st.empty()
-            step_ph.write("Sending request to LLM...")
-            
-            response = chat_completion(
-                prompt=llm_prompt,
-                model=str(selected_model),
-                api_key=api_key,
-                max_tokens=int(max_tokens_val),
-                temperature=float(temperature_val),
-            )
-            
-            # Store response in session state
-            st.session_state[f"{key_prefix}_llm_response"] = response
-            st.session_state[querying_key] = False
-            
-            query_elapsed = time.time() - query_start
-            if response.error:
-                step_ph.write(f"Sending request to LLM... Failed! ({query_elapsed:.2f}s)")
-                status.update(label="Query failed", state="error", expanded=False)
-            else:
-                step_ph.write(f"Sending request to LLM... Done! ({query_elapsed:.2f}s)")
-                status.update(label=f"Query complete! ({query_elapsed:.2f}s)", state="complete", expanded=False)
-        
-        st.rerun()  # Rerun to display the response cleanly
+    # System message to enforce formatting and conciseness
+    SYSTEM_MESSAGE = {
+        "role": "system",
+        "content": (
+            "You are a helpful financial assistant. Follow these rules strictly:\n"
+            "1. NEVER use markdown headers (no #, ##, ###, etc.). Use plain text only.\n"
+            "2. You may use bullet points, numbered lists, and bold/italic for emphasis.\n"
+            "3. Be concise and to the point. Avoid verbosity while remaining complete and clear.\n"
+            "4. Get straight to the actionable advice or answer."
+        ),
+    }
     
-    # Display response if available
-    response_key = f"{key_prefix}_llm_response"
-    if response_key in st.session_state:
-        response = st.session_state[response_key]
-        
-        if response.error:
-            st.error(f"**Error:** {response.error}")
-        else:
-            st.markdown("#### LLM Response")
-            st.markdown(response.content)
+    # Chat has started - show the chat interface
+    chat_history: list[dict[str, str]] = st.session_state.get(chat_history_key, [])
+    model = st.session_state.get(chat_model_key, selected_model)
+    total_tokens_used = st.session_state.get(total_tokens_key, 0)
+    last_error: str | None = st.session_state.get(chat_error_key, None)
+    
+    # Check if we need to get the initial response (first user message sent, no assistant reply yet)
+    # Also check that there's no pending error (user needs to retry or modify message first)
+    needs_response = (
+        len(chat_history) > 0 
+        and chat_history[-1]["role"] == "user" 
+        and last_error is None
+    )
+    
+    # Display chat history FIRST (always visible)
+    st.markdown("#### Conversation")
+    
+    # Create a container for chat messages
+    chat_container = st.container()
+    
+    with chat_container:
+        for i, message in enumerate(chat_history):
+            role = message["role"]
+            content = message["content"]
             
-            # Show token usage
-            if response.total_tokens:
-                st.caption(
-                    f"Tokens used: {response.prompt_tokens} prompt + "
-                    f"{response.completion_tokens} completion = {response.total_tokens} total"
-                )
+            if role == "user":
+                with st.chat_message("user"):
+                    # For the first message (the built prompt), show a collapsed version
+                    if i == 0:
+                        with st.expander("📋 Analysis Prompt (click to expand)", expanded=False):
+                            st.markdown(content)
+                    else:
+                        st.markdown(content)
+            elif role == "assistant":
+                with st.chat_message("assistant"):
+                    st.markdown(content)
+        
+        # If there's a pending error, show it inside the chat with proper styling
+        if last_error is not None:
+            with st.chat_message("assistant"):
+                st.error(f"**Request failed:** {last_error}")
+                st.caption("You can retry the request or type a different message below.")
+                
+                col1, col2 = st.columns([1, 3])
+                with col1:
+                    if st.button("🔄 Retry", key=f"{key_prefix}_retry_btn", type="primary"):
+                        # Clear the error and trigger a new request
+                        st.session_state[chat_error_key] = None
+                        st.rerun()
+        
+        # If waiting for response, show loading indicator INSIDE the chat
+        elif needs_response:
+            with st.chat_message("assistant"):
+                with st.spinner("Thinking..."):
+                    # Get values from session state
+                    max_tokens_val = st.session_state.get(max_tokens_key, 4000)
+                    temperature_val = st.session_state.get(temperature_key, 0.7)
+                    
+                    # Build messages with system prompt
+                    messages_to_send = [SYSTEM_MESSAGE] + chat_history
+                    
+                    response = chat_completion_messages(
+                        messages=messages_to_send,
+                        model=str(model),
+                        api_key=api_key,
+                        max_tokens=int(max_tokens_val),
+                        temperature=float(temperature_val),
+                    )
+                    
+                    if response.error:
+                        # Store error separately - don't add to chat history
+                        # This allows the user to retry without polluting the conversation
+                        st.session_state[chat_error_key] = response.error
+                    else:
+                        # Clear any previous error
+                        st.session_state[chat_error_key] = None
+                        # Add assistant response to history
+                        chat_history.append({"role": "assistant", "content": response.content})
+                        st.session_state[chat_history_key] = chat_history
+                        # Track total tokens
+                        if response.total_tokens:
+                            total_tokens_used += response.total_tokens
+                            st.session_state[total_tokens_key] = total_tokens_used
+                    
+                    st.rerun()
+    
+    # Show token usage
+    if total_tokens_used > 0:
+        st.caption(f"Total tokens used in this conversation: {total_tokens_used:,}")
+    
+    # Chat input for follow-up messages
+    user_input = st.chat_input("Type your follow-up question...", key=f"{key_prefix}_chat_input")
+    
+    if user_input:
+        # Clear any pending error when user sends a new message
+        if chat_error_key in st.session_state:
+            del st.session_state[chat_error_key]
+        # Add user message to history
+        chat_history.append({"role": "user", "content": user_input})
+        st.session_state[chat_history_key] = chat_history
+        st.rerun()
+    
+    # Reset chat button
+    st.markdown("")  # Spacing
+    col1, col2 = st.columns([1, 3])
+    with col1:
+        if st.button("🔄 Reset Chat", key=f"{key_prefix}_reset_chat_btn"):
+            # Clear chat-related session state (including error state)
+            for key in [chat_history_key, chat_started_key, chat_model_key, total_tokens_key, chat_error_key]:
+                if key in st.session_state:
+                    del st.session_state[key]
+            st.rerun()
+    with col2:
+        st.caption("Start a new conversation with the analysis prompt.")
 
 
 def _render_title() -> None:
