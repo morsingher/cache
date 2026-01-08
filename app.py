@@ -4,6 +4,7 @@ import json
 import os
 import sys
 import tempfile
+import time
 from types import SimpleNamespace
 from typing import Any
 
@@ -12,6 +13,50 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import streamlit as st
+
+
+class StepTimer:
+    """Helper class for timing steps within a st.status() context."""
+    
+    def __init__(self, status_container):
+        self.status = status_container
+        self.start_time = time.time()
+        self.step_start = None
+        self.step_placeholder = None
+    
+    def step(self, label: str) -> None:
+        """Start a new step, showing progress message."""
+        # Complete previous step if any
+        if self.step_placeholder is not None and self.step_start is not None:
+            elapsed = time.time() - self.step_start
+            # Update the placeholder with completion message
+            # (placeholder can't be updated after new content, so we just start fresh)
+        
+        self.step_start = time.time()
+        self.step_placeholder = st.empty()
+        self.step_placeholder.write(f"{label}...")
+    
+    def done(self) -> None:
+        """Mark current step as done with timing."""
+        if self.step_placeholder is not None and self.step_start is not None:
+            elapsed = time.time() - self.step_start
+            self.step_placeholder.write(f"{self._get_current_label()} Done! ({elapsed:.2f}s)")
+            self.step_placeholder = None
+            self.step_start = None
+    
+    def _get_current_label(self) -> str:
+        """Get the label from the current placeholder (fallback)."""
+        return ""
+    
+    def total_time(self) -> float:
+        """Get total elapsed time since timer creation."""
+        return time.time() - self.start_time
+
+
+def _timed_step(placeholder, label: str, start_time: float) -> None:
+    """Update a placeholder with completed step message and timing."""
+    elapsed = time.time() - start_time
+    placeholder.write(f"{label} Done! ({elapsed:.2f}s)")
 
 
 # --- Import backend exactly like the CLI does (modules live in ./cache) ---
@@ -50,7 +95,7 @@ except Exception:  # pragma: no cover
 # Cache Portfolio objects and price downloads to avoid re-fetching on every widget interaction.
 # TTL of 1 hour ensures data is refreshed periodically but not on every rerun.
 
-@st.cache_resource(ttl=3600, show_spinner="Loading portfolio data...")
+@st.cache_resource(ttl=3600, show_spinner="Loading portfolio (downloading price data, may retry on transient errors)...")
 def _cached_load_portfolio(path: str) -> Portfolio:
     """
     Cache the entire Portfolio object (including downloaded prices).
@@ -59,9 +104,9 @@ def _cached_load_portfolio(path: str) -> Portfolio:
     return Portfolio.from_json(path)
 
 
-@st.cache_data(ttl=3600, show_spinner="Downloading price data...")
+@st.cache_data(ttl=3600, show_spinner="Downloading price data (may retry on transient errors)...")
 def _cached_download_prices(tickers_tuple: tuple[str, ...]) -> pd.DataFrame:
-    """Cached wrapper for Portfolio.download_prices."""
+    """Cached wrapper for Portfolio.download_prices with retry support."""
     return Portfolio.download_prices(list(tickers_tuple))
 
 
@@ -1138,40 +1183,75 @@ def _render_llm_query_ui(
         help="All listed models are free to use. Some may have daily usage limits.",
     )
     
-    # Advanced settings
-    with st.expander("Advanced Settings", expanded=False):
-        max_tokens = st.slider(
-            "Max response tokens",
-            min_value=500,
-            max_value=8000,
-            value=4000,
-            step=500,
-            key=f"{key_prefix}_max_tokens",
-            help="Maximum number of tokens in the LLM response. Higher = longer responses.",
-        )
-        temperature = st.slider(
-            "Temperature",
-            min_value=0.0,
-            max_value=1.0,
-            value=0.7,
-            step=0.1,
-            key=f"{key_prefix}_temperature",
-            help="Higher = more creative, lower = more focused/deterministic.",
-        )
+    # Initialize advanced settings in session state with defaults if not present
+    max_tokens_key = f"{key_prefix}_max_tokens"
+    temperature_key = f"{key_prefix}_temperature"
+    if max_tokens_key not in st.session_state:
+        st.session_state[max_tokens_key] = 4000
+    if temperature_key not in st.session_state:
+        st.session_state[temperature_key] = 0.7
+    
+    # Advanced settings - use a container to prevent duplication issues
+    advanced_container = st.container()
+    with advanced_container:
+        with st.expander("Advanced Settings", expanded=False):
+            st.slider(
+                "Max response tokens",
+                min_value=500,
+                max_value=8000,
+                value=st.session_state[max_tokens_key],
+                step=500,
+                key=max_tokens_key,
+                help="Maximum number of tokens in the LLM response. Higher = longer responses.",
+            )
+            st.slider(
+                "Temperature",
+                min_value=0.0,
+                max_value=1.0,
+                value=st.session_state[temperature_key],
+                step=0.1,
+                key=temperature_key,
+                help="Higher = more creative, lower = more focused/deterministic.",
+            )
+    
+    # Track if a query is in progress to prevent UI issues
+    querying_key = f"{key_prefix}_querying"
     
     # Query button
-    if st.button("Query LLM", type="primary", key=f"{key_prefix}_query_btn"):
-        with st.spinner(f"Querying {selected_model}..."):
+    if st.button("Query LLM", type="primary", key=f"{key_prefix}_query_btn", disabled=st.session_state.get(querying_key, False)):
+        st.session_state[querying_key] = True
+        
+        # Get values from session state (not local variables)
+        max_tokens_val = st.session_state.get(max_tokens_key, 4000)
+        temperature_val = st.session_state.get(temperature_key, 0.7)
+        
+        # Use st.status() for better loading feedback
+        with st.status(f"Querying {selected_model}...", expanded=True) as status:
+            query_start = time.time()
+            step_ph = st.empty()
+            step_ph.write("Sending request to LLM...")
+            
             response = chat_completion(
                 prompt=llm_prompt,
                 model=str(selected_model),
                 api_key=api_key,
-                max_tokens=int(max_tokens) if "max_tokens" in dir() else 4000,
-                temperature=float(temperature) if "temperature" in dir() else 0.7,
+                max_tokens=int(max_tokens_val),
+                temperature=float(temperature_val),
             )
             
             # Store response in session state
             st.session_state[f"{key_prefix}_llm_response"] = response
+            st.session_state[querying_key] = False
+            
+            query_elapsed = time.time() - query_start
+            if response.error:
+                step_ph.write(f"Sending request to LLM... Failed! ({query_elapsed:.2f}s)")
+                status.update(label="Query failed", state="error", expanded=False)
+            else:
+                step_ph.write(f"Sending request to LLM... Done! ({query_elapsed:.2f}s)")
+                status.update(label=f"Query complete! ({query_elapsed:.2f}s)", state="complete", expanded=False)
+        
+        st.rerun()  # Rerun to display the response cleanly
     
     # Display response if available
     response_key = f"{key_prefix}_llm_response"
@@ -1333,8 +1413,14 @@ This section analyzes a single portfolio's historical performance using backtest
 
         # Run analysis and store in session state
         if run:
-            with st.spinner("Running portfolio analysis..."):
+            with st.status("Running portfolio analysis...", expanded=True) as status:
                 try:
+                    total_start = time.time()
+                    
+                    step_ph = st.empty()
+                    step_ph.write("Preparing data...")
+                    step_start = time.time()
+                    
                     p.adjust_dates(debug=False)
                     prices_full = p._prices_df().dropna(how="any").sort_index()
 
@@ -1349,6 +1435,11 @@ This section analyzes a single portfolio's historical performance using backtest
 
                     start_date = prices_filtered.index.min().date()
                     end_date = prices_filtered.index.max().date()
+
+                    _timed_step(step_ph, "Preparing data...", step_start)
+                    step_ph = st.empty()
+                    step_ph.write("Computing portfolio value...")
+                    step_start = time.time()
 
                     # Get target weights
                     target_weights_pct = getattr(p, "target_weights_pct", {})
@@ -1372,10 +1463,20 @@ This section analyzes a single portfolio's historical performance using backtest
 
                     stats = Portfolio.backtest_stats(value_series, rf_annual=float(rf_annual))
 
+                    _timed_step(step_ph, "Computing portfolio value...", step_start)
+                    step_ph = st.empty()
+                    step_ph.write("Computing asset trajectories...")
+                    step_start = time.time()
+
                     # Compute asset values on filtered range (use Short names for chart labels)
                     short_map = _get_short_name_map()
                     asset_values = float(initial_amount) * (prices_filtered / prices_filtered.iloc[0])
                     asset_values = asset_values.rename(columns={t: short_map.get(t, t) for t in asset_values.columns})
+
+                    _timed_step(step_ph, "Computing asset trajectories...", step_start)
+                    step_ph = st.empty()
+                    step_ph.write("Computing correlations...")
+                    step_start = time.time()
 
                     # Compute correlations (uses external stocks data if no stocks in portfolio)
                     corr_df = _rolling_correlation_to_stocks(p)
@@ -1388,6 +1489,8 @@ This section analyzes a single portfolio's historical performance using backtest
                     legend_labels = [f"{label} ({weight:.1f}%)" for label, weight in zip(labels, sizes)]
                     alloc_df = pd.DataFrame({"Asset": labels, "Weight (%)": sizes, "Legend": legend_labels})
 
+                    _timed_step(step_ph, "Computing correlations...", step_start)
+                    
                     # Store everything in session state
                     st.session_state["analyze_results"] = {
                         "start_date": start_date,
@@ -1398,8 +1501,12 @@ This section analyzes a single portfolio's historical performance using backtest
                         "corr_df": corr_df,
                         "alloc_df": alloc_df,
                     }
+                    
+                    total_elapsed = time.time() - total_start
+                    status.update(label=f"Analysis complete! ({total_elapsed:.2f}s)", state="complete", expanded=False)
 
                 except Exception as e:
+                    status.update(label="Analysis failed", state="error", expanded=False)
                     st.error(str(e))
                     st.session_state.pop("analyze_results", None)
 
@@ -1736,11 +1843,17 @@ This section compares multiple portfolios side-by-side using the same time perio
 
     run = st.button("Run comparison", type="primary", key="compare_run")
     if run:
-        with st.spinner("Comparing portfolios..."):
+        with st.status("Comparing portfolios...", expanded=True) as status:
             try:
+                total_start = time.time()
+                
                 if len(all_portfolios) < 2:
                     raise ValueError("Select/upload at least two portfolios.")
 
+                step_ph = st.empty()
+                step_ph.write("Aligning portfolio data...")
+                step_start = time.time()
+                
                 # Align each portfolio internally first
                 for _, p in all_portfolios:
                     p.adjust_dates(debug=False)
@@ -1764,6 +1877,11 @@ This section compares multiple portfolios side-by-side using the same time perio
                 start_date = common_index.min().date()
                 end_date = common_index.max().date()
 
+                _timed_step(step_ph, "Aligning portfolio data...", step_start)
+                step_ph = st.empty()
+                step_ph.write("Running backtests...")
+                step_start = time.time()
+                
                 rows: list[dict[str, object]] = []
                 value_series: dict[str, pd.Series] = {}
 
@@ -1800,9 +1918,10 @@ This section compares multiple portfolios side-by-side using the same time perio
                     )
 
                 df = pd.DataFrame(rows).set_index("Portfolio")
-
-                # Build allocation overview table (using Short names)
-                st.markdown("### Allocation overview")
+                
+                _timed_step(step_ph, "Running backtests...", step_start)
+                
+                # Build allocation data for session state
                 short_map = _get_short_name_map()
                 all_asset_names: set[str] = set()
                 portfolio_allocations: dict[str, dict[str, float]] = {}
@@ -1812,12 +1931,10 @@ This section compares multiple portfolios side-by-side using the same time perio
                     for ticker in p.tickers:
                         short_name = short_map.get(ticker, ticker)
                         weight = float(target_weights.get(ticker, 0.0))
-                        # If same asset name appears multiple times, sum the weights
                         alloc[short_name] = alloc.get(short_name, 0.0) + weight
                         all_asset_names.add(short_name)
                     portfolio_allocations[name] = alloc
 
-                # Build allocation DataFrame (transposed: assets as rows, portfolios as columns)
                 sorted_asset_names = sorted(all_asset_names)
                 alloc_rows = []
                 for name, alloc in portfolio_allocations.items():
@@ -1827,25 +1944,46 @@ This section compares multiple portfolios side-by-side using the same time perio
                         row[asset_name] = f"{weight:.1f}%"
                     alloc_rows.append(row)
                 alloc_df = pd.DataFrame(alloc_rows).set_index("Portfolio")
-                st.dataframe(alloc_df.T, width="stretch")
-
-                st.markdown("### Results")
-                st.caption(f"Comparison period: {start_date} → {end_date}")
-
-                # Format and display statistics table with % symbols (transposed: metrics as rows)
-                # Convert all values to strings to avoid Arrow serialization issues with mixed types
+                
+                # Format statistics table
                 pretty = df.copy()
                 pct_cols = ["Total Return", "CAGR", "Vol (ann.)", "Max Drawdown"]
                 for c in pct_cols:
                     pretty[c] = (pretty[c].astype(float) * 100.0).round(2).astype(str) + "%"
-                # Format Ulcer Index (not a percentage) - convert to string
                 pretty["Ulcer Index"] = pretty["Ulcer Index"].astype(float).round(2).astype(str)
                 pretty["Sharpe"] = pretty["Sharpe"].astype(float).round(2).astype(str)
                 pretty["Sortino"] = pretty["Sortino"].astype(float).round(2).astype(str)
-                st.dataframe(pretty.T, width="stretch")
+                
+                # Store results in session state
+                st.session_state["compare_results"] = {
+                    "start_date": start_date,
+                    "end_date": end_date,
+                    "alloc_df": alloc_df,
+                    "stats_df": pretty,
+                    "value_series": value_series,
+                }
+                
+                total_elapsed = time.time() - total_start
+                status.update(label=f"Comparison complete! ({total_elapsed:.2f}s)", state="complete", expanded=False)
 
-                with st.expander("ℹ️ What do these metrics mean?", expanded=False):
-                    st.markdown("""
+            except Exception as e:
+                status.update(label="Comparison failed", state="error", expanded=False)
+                st.error(str(e))
+                st.session_state.pop("compare_results", None)
+    
+    # Display results from session state (outside the status block)
+    if "compare_results" in st.session_state:
+        results = st.session_state["compare_results"]
+        
+        st.markdown("### Allocation overview")
+        st.dataframe(results["alloc_df"].T, width="stretch")
+
+        st.markdown("### Results")
+        st.caption(f"Comparison period: {results['start_date']} → {results['end_date']}")
+        st.dataframe(results["stats_df"].T, width="stretch")
+
+        with st.expander("ℹ️ What do these metrics mean?", expanded=False):
+            st.markdown("""
 **Total Return** — Cumulative gain/loss over the entire period. A 50% total return means €10,000 became €15,000.
 
 **CAGR (Compound Annual Growth Rate)** — Average annual return assuming reinvestment. Useful for comparing portfolios across different time periods.
@@ -1861,39 +1999,36 @@ This section compares multiple portfolios side-by-side using the same time perio
 **Ulcer Index** — Measures downside volatility using the quadratic mean of percentage drawdowns. Lower is better: below 5 is excellent, 5-10 is good, 10-15 is moderate, above 15 indicates significant stress.
 
 *A portfolio with higher CAGR but also higher Max Drawdown or Ulcer Index may not suit risk-averse investors.*
-                    """)
+            """)
 
-                # Build Altair chart
-                st.markdown("#### Portfolio value over time")
-                chart_data = []
-                for name, v in value_series.items():
-                    for date, value in v.items():
-                        chart_data.append({"Date": date, "Portfolio": name, "Value": float(value)})
-                chart_df = pd.DataFrame(chart_data)
+        # Build Altair chart
+        st.markdown("#### Portfolio value over time")
+        chart_data = []
+        for name, v in results["value_series"].items():
+            for date, value in v.items():
+                chart_data.append({"Date": date, "Portfolio": name, "Value": float(value)})
+        chart_df = pd.DataFrame(chart_data)
 
-                y_scale_type = "log" if y_scale == "Logarithmic" else "linear"
-                x_axis_format = alt.X("Date:T", title="Date", axis=alt.Axis(format="%m/%Y"))
+        y_scale_type = "log" if y_scale == "Logarithmic" else "linear"
+        x_axis_format = alt.X("Date:T", title="Date", axis=alt.Axis(format="%m/%Y"))
 
-                chart = (
-                    alt.Chart(chart_df)
-                    .mark_line(strokeWidth=2.0)
-                    .encode(
-                        x=x_axis_format,
-                        y=alt.Y("Value:Q", title="Value (EUR)", scale=alt.Scale(type=y_scale_type)),
-                        color=alt.Color("Portfolio:N", title="Portfolio"),
-                        tooltip=[
-                            alt.Tooltip("Date:T", title="Date"),
-                            alt.Tooltip("Portfolio:N", title="Portfolio"),
-                            alt.Tooltip("Value:Q", title="Value (EUR)", format=",.2f"),
-                        ],
-                    )
-                    .properties(height=400)
-                    .interactive()
-                )
-                st.altair_chart(chart, width="stretch")
-
-            except Exception as e:
-                st.error(str(e))
+        chart = (
+            alt.Chart(chart_df)
+            .mark_line(strokeWidth=2.0)
+            .encode(
+                x=x_axis_format,
+                y=alt.Y("Value:Q", title="Value (EUR)", scale=alt.Scale(type=y_scale_type)),
+                color=alt.Color("Portfolio:N", title="Portfolio"),
+                tooltip=[
+                    alt.Tooltip("Date:T", title="Date"),
+                    alt.Tooltip("Portfolio:N", title="Portfolio"),
+                    alt.Tooltip("Value:Q", title="Value (EUR)", format=",.2f"),
+                ],
+            )
+            .properties(height=400)
+            .interactive()
+        )
+        st.altair_chart(chart, width="stretch")
 
 
 elif page == "rebalance":
@@ -1922,17 +2057,28 @@ This section helps you allocate new cash to your portfolio to move closer to you
 
         run = st.button("Compute rebalance", type="primary", key="rebalance_run")
         if run:
-            with st.spinner("Computing rebalance and fetching macro data..."):
+            with st.status("Computing rebalance...", expanded=True) as status:
                 try:
+                    total_start = time.time()
+                    
                     if not fred_api_key:
                         raise ValueError("FRED_API_KEY environment variable is required.")
 
+                    step_ph = st.empty()
+                    step_ph.write("Computing optimal allocation...")
+                    step_start = time.time()
+                    
                     table = p.rebalance(float(new_cash))
                     table_transposed = table.T
                     short_map = _get_short_name_map()
                     # Use tickers to look up Short names (table columns are labels, not tickers)
                     table_transposed.columns = [short_map.get(t, table_transposed.columns[i]) for i, t in enumerate(p.tickers)]
 
+                    _timed_step(step_ph, "Computing optimal allocation...", step_start)
+                    step_ph = st.empty()
+                    step_ph.write("Computing portfolio diagnostics...")
+                    step_start = time.time()
+                    
                     diag = None
                     diag_transposed = None
                     diag_error = None
@@ -1944,6 +2090,11 @@ This section helps you allocate new cash to your portfolio to move closer to you
                     except Exception as e:
                         diag_error = str(e)
 
+                    _timed_step(step_ph, "Computing portfolio diagnostics...", step_start)
+                    step_ph = st.empty()
+                    step_ph.write("Fetching macro data from FRED...")
+                    step_start = time.time()
+                    
                     snap = get_macro_snapshot(fred_api_key=fred_api_key, debug=False)
                     
                     # Fetch macro chart data
@@ -2012,6 +2163,8 @@ This section helps you allocate new cash to your portfolio to move closer to you
                         except Exception:
                             pass
 
+                    _timed_step(step_ph, "Fetching macro data from FRED...", step_start)
+                    
                     # Store all results in session state
                     st.session_state["rebalance_results"] = {
                         "table_transposed": table_transposed,
@@ -2024,8 +2177,12 @@ This section helps you allocate new cash to your portfolio to move closer to you
                     }
                     # Clear any previous LLM response when recomputing
                     st.session_state.pop("rebalance_llm_response", None)
+                    
+                    total_elapsed = time.time() - total_start
+                    status.update(label=f"Rebalancing complete! ({total_elapsed:.2f}s)", state="complete", expanded=False)
 
                 except Exception as e:
+                    status.update(label="Rebalancing failed", state="error", expanded=False)
                     st.error(str(e))
                     st.session_state.pop("rebalance_results", None)
 
@@ -2135,17 +2292,33 @@ These diagnostics help you understand recent portfolio behavior over the last ~1
             if snap is not None:
                 st.markdown("### Macro-economic overview")
                 st.caption(f"Data as of: {snap.asof.date()}")
+                
+                # Helper to format values, showing "—" for None
+                def _fmt_pct(val: float | None) -> str:
+                    return f"{val:.2f}%" if val is not None else "—"
+                
+                # Check if any values are missing
+                missing_data = any([
+                    snap.ecb_dfr_pct is None,
+                    snap.de_cpi_yoy_pct is None,
+                    snap.usd_10y_tips_yield_pct is None,
+                    snap.de_10y_yield_pct is None,
+                    snap.de_10y_real_yield_proxy_pct is None,
+                    snap.global_earnings_yield_est_pct is None,
+                ])
+                if missing_data:
+                    st.warning("⚠️ Some FRED data failed to load. Try re-running the analysis.")
 
                 m1, m2, m3 = st.columns(3)
                 with m1:
-                    st.metric("ECB Deposit Rate", f"{snap.ecb_dfr_pct:.2f}%")
-                    st.metric("DE CPI YoY", f"{snap.de_cpi_yoy_pct:.2f}%")
+                    st.metric("ECB Deposit Rate", _fmt_pct(snap.ecb_dfr_pct))
+                    st.metric("DE CPI YoY", _fmt_pct(snap.de_cpi_yoy_pct))
                 with m2:
-                    st.metric("US 10Y TIPS Yield", f"{snap.usd_10y_tips_yield_pct:.2f}%")
-                    st.metric("DE 10Y Yield", f"{snap.de_10y_yield_pct:.2f}%")
+                    st.metric("US 10Y TIPS Yield", _fmt_pct(snap.usd_10y_tips_yield_pct))
+                    st.metric("DE 10Y Yield", _fmt_pct(snap.de_10y_yield_pct))
                 with m3:
-                    st.metric("DE 10Y Real Yield (proxy)", f"{snap.de_10y_real_yield_proxy_pct:.2f}%")
-                    st.metric("Global Earnings Yield Est.", f"{snap.global_earnings_yield_est_pct:.2f}%")
+                    st.metric("DE 10Y Real Yield (proxy)", _fmt_pct(snap.de_10y_real_yield_proxy_pct))
+                    st.metric("Global Earnings Yield Est.", _fmt_pct(snap.global_earnings_yield_est_pct))
                 
                 with st.expander("ℹ️ What do these indicators mean?", expanded=False):
                     st.markdown("""
@@ -2168,26 +2341,27 @@ These macro indicators provide context for investment decisions.
                 if results["macro_chart_data"]:
                     st.markdown("#### Last 12 months trend")
                     macro_df = pd.DataFrame(results["macro_chart_data"])
-                    x_axis_format = alt.X("Date:T", title="Date", axis=alt.Axis(format="%m/%Y"))
-                    macro_chart = (
-                        alt.Chart(macro_df)
-                        .mark_line(strokeWidth=2.0)
-                        .encode(
-                            x=x_axis_format,
-                            y=alt.Y("Value:Q", title="Rate (%)"),
-                            color=alt.Color("Indicator:N", title="Indicator"),
-                            tooltip=[
-                                alt.Tooltip("Date:T", title="Date"),
-                                alt.Tooltip("Indicator:N", title="Indicator"),
-                                alt.Tooltip("Value:Q", title="Value", format=".2f"),
-                            ],
+                    if not macro_df.empty:
+                        x_axis_format = alt.X("Date:T", title="Date", axis=alt.Axis(format="%m/%Y"))
+                        macro_chart = (
+                            alt.Chart(macro_df)
+                            .mark_line(strokeWidth=2.0)
+                            .encode(
+                                x=x_axis_format,
+                                y=alt.Y("Value:Q", title="Rate (%)"),
+                                color=alt.Color("Indicator:N", title="Indicator"),
+                                tooltip=[
+                                    alt.Tooltip("Date:T", title="Date"),
+                                    alt.Tooltip("Indicator:N", title="Indicator"),
+                                    alt.Tooltip("Value:Q", title="Value", format=".2f"),
+                                ],
+                            )
+                            .properties(height=300)
+                            .interactive()
                         )
-                        .properties(height=300)
-                        .interactive()
-                    )
-                    st.altair_chart(macro_chart, width="stretch")
+                        st.altair_chart(macro_chart, width="stretch")
             else:
-                st.warning("Could not fetch macro data. Check your FRED API key.")
+                st.warning("Could not fetch macro data. Check your FRED API key and try re-running the analysis.")
 
             # AI-Assisted Rebalancing section (combined prompt + query)
             if results["llm_prompt"]:
@@ -2350,8 +2524,10 @@ This section explores what would happen if you added a new asset to your portfol
         run = st.button("Run what-if", type="primary", key="whatif_run")
 
         if run:
-            with st.spinner("Running what-if analysis..."):
+            with st.status("Running what-if analysis...", expanded=True) as status:
                 try:
+                    total_start = time.time()
+                    
                     # Get selected candidates (tickers) from multiselect
                     if not filtered_candidates or not selected_candidate_shorts:
                         raise ValueError("No candidate assets selected. Please select at least one asset.")
@@ -2371,6 +2547,10 @@ This section explores what would happen if you added a new asset to your portfol
 
                     base_target_weights = _target_weights_fraction(p)
 
+                    step_ph = st.empty()
+                    step_ph.write("Downloading price data...")
+                    step_start = time.time()
+                    
                     tickers_universe = list(getattr(p, "tickers", [])) + [c for c in candidates if c not in getattr(p, "tickers", [])]
                     prices_universe = _cached_download_prices(tuple(sorted(tickers_universe)))
 
@@ -2402,6 +2582,11 @@ This section explores what would happen if you added a new asset to your portfol
                     rets_candidates = Portfolio.monthly_returns_from_prices(prices_candidates, return_method="pct", common_start=common_start_ts)
                     rets_portfolio = Portfolio.monthly_returns_from_prices(prices_portfolio, return_method="pct", common_start=common_start_ts)
 
+                    _timed_step(step_ph, "Downloading price data...", step_start)
+                    step_ph = st.empty()
+                    step_ph.write("Computing diversification scores...")
+                    step_start = time.time()
+                    
                     scores = diversification_scores(
                         rets_candidates,
                         rets_portfolio,
@@ -2457,6 +2642,11 @@ This section explores what would happen if you added a new asset to your portfol
                         scores_transposed = scores_display.T
                         llm_scores_df = scores_transposed
 
+                    _timed_step(step_ph, "Computing diversification scores...", step_start)
+                    step_ph = st.empty()
+                    step_ph.write("Running RRR analysis...")
+                    step_start = time.time()
+                    
                     # RRR Analysis (Portfolio Intuition)
                     rrr_transposed = None
                     rrr_error = None
@@ -2488,13 +2678,13 @@ This section explores what would happen if you added a new asset to your portfol
                                     margin = float(rrr_a - hurdle) if pd.notna(rrr_a) and pd.notna(hurdle) else float("nan")
                                     rrr_pa = Portfolio.rrr_combination(mu_p=mu_p, vol_p=vol_p, mu_a=mu_a, vol_a=vol_a, rho=rho, w_a=float(swap_weight))
                                     delta_rrr = float(rrr_pa - rrr_p) if pd.notna(rrr_pa) and pd.notna(rrr_p) else float("nan")
-                                    status = "PASS" if margin > 0 else "FAIL"
+                                    rrr_status = "PASS" if margin > 0 else "FAIL"
                                 else:
                                     rrr_a = float("nan")
                                     margin = float("nan")
                                     rrr_pa = float("nan")
                                     delta_rrr = float("nan")
-                                    status = "N/A (μ ≤ 0)"
+                                    rrr_status = "N/A (μ ≤ 0)"
 
                                 rrr_rows.append({
                                     "Candidate": candidate_name_map.get(c, c),
@@ -2505,7 +2695,7 @@ This section explores what would happen if you added a new asset to your portfol
                                     "Margin (RRR_a - Hurdle)": f"{margin:.2f}" if pd.notna(margin) else "—",
                                     f"Combined RRR ({swap_pct:.0f}% swap)": f"{rrr_pa:.2f}" if pd.notna(rrr_pa) else "—",
                                     "Δ RRR vs Portfolio": f"{delta_rrr:.2f}" if pd.notna(delta_rrr) else "—",
-                                    "Status": status,
+                                    "Status": rrr_status,
                                 })
 
                             if rrr_rows:
@@ -2515,6 +2705,11 @@ This section explores what would happen if you added a new asset to your portfol
                     except Exception as e:
                         rrr_error = str(e)
 
+                    _timed_step(step_ph, "Running RRR analysis...", step_start)
+                    step_ph = st.empty()
+                    step_ph.write("Running backtests...")
+                    step_start = time.time()
+                    
                     # Backtest comparison table
                     backtest_df = None
                     cand_weights: dict[str, dict[str, float]] = {}
@@ -2595,8 +2790,14 @@ This section explores what would happen if you added a new asset to your portfol
                     }
                     # Clear any previous LLM response when recomputing
                     st.session_state.pop("whatif_llm_response", None)
+                    
+                    _timed_step(step_ph, "Running backtests...", step_start)
+                    
+                    total_elapsed = time.time() - total_start
+                    status.update(label=f"What-if analysis complete! ({total_elapsed:.2f}s)", state="complete", expanded=False)
 
                 except Exception as e:
+                    status.update(label="What-if analysis failed", state="error", expanded=False)
                     st.error(str(e))
                     st.session_state.pop("whatif_results", None)
 

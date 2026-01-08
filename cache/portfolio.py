@@ -1,3 +1,6 @@
+import time
+import logging
+
 import yfinance as yf
 import pandas as pd
 from datetime import date
@@ -5,6 +8,113 @@ import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 import numpy as np
 import json
+
+# Configure logging for retry attempts
+logger = logging.getLogger(__name__)
+
+
+def _retry_yf_download(
+    tickers: list[str],
+    *,
+    period: str = "max",
+    auto_adjust: bool = True,
+    ignore_tz: bool = True,
+    progress: bool = False,
+    threads: bool = True,
+    max_retries: int = 4,
+    base_delay: float = 1.0,
+) -> pd.DataFrame | None:
+    """
+    Wrapper around yf.download with retry logic and exponential backoff.
+    
+    Args:
+        tickers: List of ticker symbols to download.
+        period: Data period (e.g., "max", "1y").
+        auto_adjust: Whether to auto-adjust prices.
+        ignore_tz: Whether to ignore timezone.
+        progress: Whether to show download progress.
+        threads: Whether to use multi-threading.
+        max_retries: Maximum number of retry attempts (default: 4).
+        base_delay: Base delay in seconds between retries (default: 1.0).
+    
+    Returns:
+        DataFrame with downloaded data, or None if all retries failed.
+    
+    Raises:
+        Exception: Re-raises the last exception if all retries fail.
+    """
+    last_exception = None
+    
+    for attempt in range(max_retries):
+        try:
+            raw = yf.download(
+                tickers,
+                period=period,
+                auto_adjust=auto_adjust,
+                ignore_tz=ignore_tz,
+                progress=progress,
+                threads=threads,
+            )
+            
+            # Check if the download actually returned valid data
+            if raw is None or raw.empty:
+                raise ValueError(f"yfinance returned empty data for tickers: {tickers}")
+            
+            # For single ticker, check if we got actual price data
+            if len(tickers) == 1:
+                if isinstance(raw.columns, pd.MultiIndex):
+                    # Check if the Close data exists and has values
+                    if "Close" not in raw.columns.get_level_values(0):
+                        raise ValueError(f"No 'Close' data returned for {tickers[0]}")
+                    close_data = raw["Close"]
+                    if close_data.dropna().empty:
+                        raise ValueError(f"Empty 'Close' data for {tickers[0]}")
+                else:
+                    if "Close" not in raw.columns and raw.dropna().empty:
+                        raise ValueError(f"Empty data for {tickers[0]}")
+            else:
+                # Multiple tickers: check if Close data exists
+                if "Close" in raw.columns.get_level_values(0) if isinstance(raw.columns, pd.MultiIndex) else "Close" in raw.columns:
+                    close_data = raw["Close"] if isinstance(raw.columns, pd.MultiIndex) else raw[["Close"]]
+                    if close_data.dropna(how="all").empty:
+                        raise ValueError(f"Empty 'Close' data for tickers: {tickers}")
+            
+            return raw
+            
+        except Exception as e:
+            last_exception = e
+            error_msg = str(e)
+            
+            # Check if this is a retryable error
+            retryable = any([
+                "NoneType" in error_msg,
+                "subscriptable" in error_msg,
+                "Connection" in error_msg,
+                "Timeout" in error_msg,
+                "HTTPError" in error_msg,
+                "Empty" in error_msg,
+                "404" in error_msg,
+                "500" in error_msg,
+                "502" in error_msg,
+                "503" in error_msg,
+            ])
+            
+            if attempt < max_retries - 1 and retryable:
+                delay = base_delay * (2 ** attempt)  # Exponential backoff
+                logger.warning(
+                    f"yfinance download failed for {tickers} (attempt {attempt + 1}/{max_retries}): {e}. "
+                    f"Retrying in {delay:.1f}s..."
+                )
+                time.sleep(delay)
+            else:
+                # Non-retryable error or last attempt
+                break
+    
+    # All retries exhausted or non-retryable error
+    if last_exception:
+        raise last_exception
+    
+    return None
 
 class Portfolio:
     def __init__(self, tickers: list[str], weights: list[float], assets: list[str] | None = None):
@@ -146,13 +256,15 @@ class Portfolio:
 
         raw = None
         if tickers_to_download:
-            raw = yf.download(
+            raw = _retry_yf_download(
                 tickers_to_download,
                 period=period,
                 auto_adjust=auto_adjust,
                 ignore_tz=ignore_tz,
                 progress=progress,
                 threads=threads,
+                max_retries=4,
+                base_delay=1.0,
             )
 
         if not tickers_to_download:

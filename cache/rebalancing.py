@@ -1,4 +1,6 @@
+import logging
 import os
+import time
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -11,6 +13,8 @@ try:
     from fredapi import Fred  # type: ignore
 except Exception:
     Fred = None
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -28,16 +32,54 @@ class MacroSnapshot:
     eurusd_12m_ago: float | None
 
 
-def _try_get_fred_series(fred: "Fred", series_id: str, debug: bool) -> pd.Series | None:
-    try:
-        s = fred.get_series(series_id)
-        if isinstance(s, pd.Series):
-            return s.dropna()
-        return None
-    except Exception as e:
-        if debug:
-            print(f"[macro] Failed to fetch FRED series {series_id}: {e}")
-        return None
+def _try_get_fred_series(
+    fred: "Fred",
+    series_id: str,
+    debug: bool,
+    max_retries: int = 6,
+    base_delay: float = 0.5,
+) -> pd.Series | None:
+    """
+    Fetch a FRED series with retry logic and exponential backoff.
+    """
+    last_exception = None
+    
+    for attempt in range(max_retries):
+        try:
+            s = fred.get_series(series_id)
+            if isinstance(s, pd.Series):
+                return s.dropna()
+            return None
+        except Exception as e:
+            last_exception = e
+            error_msg = str(e)
+            
+            # Check if this is a retryable error
+            retryable = any([
+                "Connection" in error_msg,
+                "Timeout" in error_msg,
+                "HTTPError" in error_msg,
+                "404" in error_msg,
+                "500" in error_msg,
+                "502" in error_msg,
+                "503" in error_msg,
+                "URL" in error_msg,
+                "urlopen" in error_msg.lower(),
+            ])
+            
+            if attempt < max_retries - 1 and retryable:
+                delay = base_delay * (2 ** attempt)
+                logger.warning(
+                    f"FRED fetch failed for {series_id} (attempt {attempt + 1}/{max_retries}): {e}. "
+                    f"Retrying in {delay:.1f}s..."
+                )
+                time.sleep(delay)
+            else:
+                break
+    
+    if debug and last_exception:
+        print(f"[macro] Failed to fetch FRED series {series_id}: {last_exception}")
+    return None
 
 
 def get_macro_snapshot(fred_api_key: str | None = None, debug: bool = False) -> MacroSnapshot | None:
