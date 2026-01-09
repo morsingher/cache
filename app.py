@@ -100,6 +100,9 @@ def _retry_on_rate_limit(fn, *args, max_retries: int = 5, initial_wait: float = 
     """
     Retry a function on rate limit errors with exponential backoff.
     Shows a warning toast to the user while waiting.
+    
+    Catches both explicit rate limit errors and "no valid price data" errors,
+    which can occur when Yahoo Finance returns empty data due to rate limiting.
     """
     last_error = None
     wait_time = initial_wait
@@ -109,13 +112,22 @@ def _retry_on_rate_limit(fn, *args, max_retries: int = 5, initial_wait: float = 
             return fn(*args, **kwargs)
         except Exception as e:
             error_str = str(e).lower()
-            # Check for rate limit errors (various forms)
-            if "rate" in error_str or "too many requests" in error_str or "429" in error_str:
+            # Check for rate limit errors (various forms) OR empty data errors
+            # Empty data errors can happen when YF is rate limited but doesn't raise an exception
+            is_rate_limit = (
+                "rate" in error_str 
+                or "too many requests" in error_str 
+                or "429" in error_str
+            )
+            is_empty_data = "no valid price" in error_str
+            
+            if is_rate_limit or is_empty_data:
                 last_error = e
                 if attempt < max_retries - 1:
                     # Show warning with countdown
+                    reason = "Rate limit hit" if is_rate_limit else "Empty data returned (possible rate limit)"
                     st.warning(
-                        f"⏳ Yahoo Finance rate limit hit. Waiting {wait_time:.0f}s before retry "
+                        f"⏳ Yahoo Finance: {reason}. Waiting {wait_time:.0f}s before retry "
                         f"(attempt {attempt + 1}/{max_retries})..."
                     )
                     time.sleep(wait_time)
@@ -124,7 +136,7 @@ def _retry_on_rate_limit(fn, *args, max_retries: int = 5, initial_wait: float = 
                     # Final attempt failed
                     raise
             else:
-                # Not a rate limit error, re-raise immediately
+                # Not a retryable error, re-raise immediately
                 raise
     
     # Should not reach here, but just in case
