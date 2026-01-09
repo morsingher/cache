@@ -2887,6 +2887,7 @@ This section explores what would happen if you added a new asset to your portfol
                                     rrr_status = "PASS" if margin > 0 else "FAIL"
                                 else:
                                     rrr_a = float("nan")
+                                    hurdle = float("nan")
                                     margin = float("nan")
                                     rrr_pa = float("nan")
                                     delta_rrr = float("nan")
