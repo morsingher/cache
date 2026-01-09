@@ -3,132 +3,187 @@
         {
             "Name": "Stocks",
             "Ticker": "ACWE.MI",
-            "Short": "Stocks"
+            "Short": "Stocks",
+            "Description": "Tracks the performance of the MSCI All Country World Index (ACWI), covering large and mid-cap stocks across 23 developed and 24 emerging markets.",
+            "Link": "https://www.justetf.com/en/etf-profile.html?isin=IE00B44Z5B48"
         },
         {
             "Name": "Bonds",
             "Ticker": "AGGH.MI",
-            "Short": "Bonds"
+            "Short": "Bonds",
+            "Description": "Tracks the Bloomberg Global Aggregate Bond Index, offering exposure to investment-grade bonds from issuers around the world.",
+            "Link": "https://www.justetf.com/en/etf-profile.html?isin=IE00BDBRDM35"
         },
         {
             "Name": "Gold",
             "Ticker": "SGLD.MI",
-            "Short": "Gold"
+            "Short": "Gold",
+            "Description": "A physical Exchange Traded Commodity (ETC) that tracks the spot price of gold by holding allocated gold bars in secure vaults.",
+            "Link": "https://www.justetf.com/en/etf-profile.html?isin=IE00B579F325"
         },
         {
             "Name": "Crypto BTC",
             "Ticker": "BTC-EUR",
-            "Short": "BTC"
+            "Short": "BTC",
+            "Description": "Bitcoin is a decentralized digital currency and the largest cryptocurrency by market capitalization.",
+            "Link": "https://coinmarketcap.com/currencies/bitcoin/"
         },
         {
             "Name": "Managed Futures",
             "Ticker": "DBMF",
-            "Short": "Man. Futures"
+            "Short": "Man. Futures",
+            "Description": "A synthetic asset tracking the iMGP DBi Managed Futures strategy (DBMFE.PA) and reconstructed using the US-listed ticker for historical data.",
+            "Link": "https://www.justetf.com/en/etf-profile.html?isin=LU2951555403"
         },
         {
             "Name": "Commodity Carry",
             "Ticker": "UEQC.DE",
-            "Short": "Comm. Carry"
+            "Short": "Comm. Carry",
+            "Description": "Tracks the UBS CM-BCOM Outperformance Strategy, aiming to generate returns through optimized rolling of commodity futures contracts.",
+            "Link": "https://www.justetf.com/en/etf-profile.html?isin=IE00BKFB6L02"
         },
         {
             "Name": "Commodity Beta",
             "Ticker": "CMOD.MI",
-            "Short": "Comm. Beta"
+            "Short": "Comm. Beta",
+            "Description": "Tracks the Bloomberg Commodity Index, providing broad exposure to energy, agriculture, precious metals, and industrial metals.",
+            "Link": "https://www.justetf.com/en/etf-profile.html?isin=IE00BD6FTQ80"
         },
         {
-            "Name": "Stocks Multifactor", 
+            "Name": "Stocks Multifactor",
             "Ticker": "JPGL.MI",
-            "Short": "Multifactor"
+            "Short": "Multifactor",
+            "Description": "Tracks the JP Morgan Diversified Factor Global Developed (Equity) Index, selecting stocks based on value, momentum, and quality factors.",
+            "Link": "https://www.justetf.com/en/etf-profile.html?isin=IE00BJRCLL96"
         },
         {
-            "Name": "Cash", 
+            "Name": "Cash",
             "Ticker": "XEON.MI",
-            "Short": "Cash"
+            "Short": "Cash",
+            "Description": "Tracks the performance of the €STR (Euro Short-Term Rate), effectively providing exposure to the overnight interbank interest rate.",
+            "Link": "https://www.justetf.com/en/etf-profile.html?isin=LU0290358497"
         },
         {
-            "Name": "Crypto ETH", 
+            "Name": "Crypto ETH",
             "Ticker": "ETH-EUR",
-            "Short": "ETH"
+            "Short": "ETH",
+            "Description": "Ethereum is a decentralized open-source blockchain system that features its own cryptocurrency, Ether.",
+            "Link": "https://coinmarketcap.com/currencies/ethereum/"
         },
         {
-            "Name": "Bonds EUR Infl", 
+            "Name": "Bonds EUR Infl",
             "Ticker": "IBCI.MI",
-            "Short": "Bonds IL"
+            "Short": "Bonds IL",
+            "Description": "Tracks the Bloomberg Euro Government Inflation-Linked Bond Index, offering exposure to inflation-protected bonds issued by Eurozone governments.",
+            "Link": "https://www.justetf.com/en/etf-profile.html?isin=IE00B0M62X26"
         },
         {
-            "Name": "Real Estate", 
+            "Name": "Real Estate",
             "Ticker": "EPRA.MI",
-            "Short": "REITs"
+            "Short": "REITs",
+            "Description": "Tracks the FTSE EPRA/NAREIT Developed Index, investing in listed real estate companies and REITs worldwide.",
+            "Link": "https://www.justetf.com/en/etf-profile.html?isin=LU1437018838"
         },
         {
-            "Name": "Stocks Min Vol", 
+            "Name": "Stocks Min Vol",
             "Ticker": "MVOL.MI",
-            "Short": "Min Vol"
+            "Short": "Min Vol",
+            "Description": "Tracks the MSCI World Minimum Volatility Index, composed of global companies selected to have lower volatility characteristics.",
+            "Link": "https://www.justetf.com/en/etf-profile.html?isin=IE00B8FHGS14"
         },
         {
-            "Name": "Stocks Momentum", 
+            "Name": "Stocks Momentum",
             "Ticker": "IWMO.MI",
-            "Short": "Momentum"
+            "Short": "Momentum",
+            "Description": "Tracks the MSCI World Momentum Index, investing in global companies that have shown a recent upward price trend.",
+            "Link": "https://www.justetf.com/en/etf-profile.html?isin=IE00BP3QZ825"
         },
         {
-            "Name": "Bonds EUR HY", 
+            "Name": "Bonds EUR HY",
             "Ticker": "EHYA.MI",
-            "Short": "Bonds HY"
+            "Short": "Bonds HY",
+            "Description": "Tracks the Bloomberg MSCI Euro Corporate High Yield ESG SRI Bond Index, investing in Euro-denominated high yield corporate bonds.",
+            "Link": "https://www.justetf.com/en/etf-profile.html?isin=IE00BJK55C48"
         },
         {
-            "Name": "Silver", 
+            "Name": "Silver",
             "Ticker": "XAD6.MI",
-            "Short": "Silver"
+            "Short": "Silver",
+            "Description": "A physical Exchange Traded Commodity (ETC) that tracks the spot price of silver by holding physical silver in vaults.",
+            "Link": "https://www.justetf.com/en/etf-profile.html?isin=DE000A1E0HS6"
         },
         {
-            "Name": "Crypto SOL", 
+            "Name": "Crypto SOL",
             "Ticker": "SOL-EUR",
-            "Short": "SOL"
+            "Short": "SOL",
+            "Description": "Solana is a blockchain platform designed to host decentralized, scalable applications.",
+            "Link": "https://coinmarketcap.com/currencies/solana/"
         },
         {
-            "Name": "Crypto XRP", 
+            "Name": "Crypto XRP",
             "Ticker": "XRP-EUR",
-            "Short": "XRP"
+            "Short": "XRP",
+            "Description": "XRP is a digital asset built for payments and is the native cryptocurrency of the XRP Ledger.",
+            "Link": "https://coinmarketcap.com/currencies/xrp/"
         },
         {
-            "Name": "Infl Exp EUR", 
+            "Name": "Infl Exp EUR",
             "Ticker": "INFL.MI",
-            "Short": "Infl Exp"
+            "Short": "Infl Exp",
+            "Description": "Tracks the Markit iBoxx EUR Breakeven Euro-Inflation France & Germany Index, providing exposure to inflation expectations.",
+            "Link": "https://www.justetf.com/en/etf-profile.html?isin=LU1390062245"
         },
         {
-            "Name": "Stocks Value", 
+            "Name": "Stocks Value",
             "Ticker": "IWVL.MI",
-            "Short": "Value"
+            "Short": "Value",
+            "Description": "Tracks the MSCI World Enhanced Value Index, composed of global companies that appear undervalued relative to their fundamentals.",
+            "Link": "https://www.justetf.com/en/etf-profile.html?isin=IE00BP3QZB59"
         },
         {
-            "Name": "Stocks Quality", 
+            "Name": "Stocks Quality",
             "Ticker": "IWQU.MI",
-            "Short": "Quality"
+            "Short": "Quality",
+            "Description": "Tracks the MSCI World Sector Neutral Quality Index, investing in global stocks with strong and stable earnings.",
+            "Link": "https://www.justetf.com/en/etf-profile.html?isin=IE00BP3QZ601"
         },
         {
-            "Name": "Stocks Small Cap", 
+            "Name": "Stocks Small Cap",
             "Ticker": "IUSN.DE",
-            "Short": "Small Cap"
+            "Short": "Small Cap",
+            "Description": "Tracks the MSCI World Small Cap Index, providing exposure to small public companies across developed markets.",
+            "Link": "https://www.justetf.com/en/etf-profile.html?isin=IE00BF4RFH31"
         },
         {
-            "Name": "Stocks SCV", 
+            "Name": "Stocks SCV",
             "Ticker": "ZPRVX",
-            "Short": "SCV"
+            "Short": "SCV",
+            "Description": "A synthetic composite asset comprised of 70% SPDR MSCI USA Small Cap Value (ZPRV) and 30% SPDR MSCI Europe Small Cap Value (ZPRX).",
+            "Link": [
+                "https://www.justetf.com/en/etf-profile.html?isin=IE00BSPLC413",
+                "https://www.justetf.com/en/etf-profile.html?isin=IE00BSPLC298"
+            ]
         },
         {
-            "Name": "Stocks High Div", 
+            "Name": "Stocks High Div",
             "Ticker": "GGRA.MI",
-            "Short": "High Div"
+            "Short": "High Div",
+            "Description": "Tracks the WisdomTree Global Developed Quality Dividend Growth Index, investing in dividend-paying companies with growth characteristics.",
+            "Link": "https://www.justetf.com/en/etf-profile.html?isin=IE00BZ56SW52"
         },
         {
-            "Name": "Bonds EUR", 
+            "Name": "Bonds EUR",
             "Ticker": "VGEA.MI",
-            "Short": "Bonds EUR"
+            "Short": "Bonds EUR",
+            "Description": "Tracks the Bloomberg Euro-Aggregate: Treasury Bond Index, investing in Euro-denominated government bonds.",
+            "Link": "https://www.justetf.com/en/etf-profile.html?isin=IE00BH04GL39"
         },
         {
-            "Name": "Commodity Mix", 
+            "Name": "Commodity Mix",
             "Ticker": "CCUSAS.MI",
-            "Short": "Comm. Mix"
+            "Short": "Comm. Mix",
+            "Description": "Tracks the UBS CMCI Composite Index, offering broad commodity exposure with constant maturity to manage roll yield risks.",
+            "Link": "https://www.justetf.com/en/etf-profile.html?isin=IE00B53H0131"
         }
     ]
 }

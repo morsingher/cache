@@ -335,6 +335,46 @@ def _get_short_name_map() -> dict[str, str]:
     return {asset.get("Ticker", ""): asset.get("Short", asset.get("Name", "")) for asset in assets if asset.get("Ticker")}
 
 
+def _render_asset_help_dropdown() -> None:
+    """Render a dropdown showing available assets with descriptions and clickable links."""
+    assets = _load_available_assets()
+    if not assets:
+        return
+    
+    with st.expander("💡 Need help choosing assets?", expanded=False):
+        for asset in assets:
+            name = asset.get("Name", "")
+            ticker = asset.get("Ticker", "")
+            description = asset.get("Description", "")
+            link = asset.get("Link", "")
+            
+            if not name or not ticker:
+                continue
+            
+            # Handle Link being either a string or a list of strings
+            # Use HTML for proper clickable links that open in new tab
+            if isinstance(link, list):
+                # Multiple links - show ticker with each link
+                ticker_links = " / ".join([
+                    f'<a href="{l}" target="_blank" style="color: #0066cc; text-decoration: underline;">{ticker}</a>'
+                    for l in link
+                ])
+                st.markdown(
+                    f"**{name}** ({ticker_links}): {description}",
+                    unsafe_allow_html=True
+                )
+            elif link:
+                # Single link - make ticker clickable
+                ticker_link = f'<a href="{link}" target="_blank" style="color: #0066cc; text-decoration: underline;">{ticker}</a>'
+                st.markdown(
+                    f"**{name}** ({ticker_link}): {description}",
+                    unsafe_allow_html=True
+                )
+            else:
+                # No link available
+                st.markdown(f"**{name}** ({ticker}): {description}")
+
+
 def _render_portfolio_preview(p: Portfolio) -> None:
     """Render a compact allocation preview for a portfolio using Short names."""
     target_weights_pct = getattr(p, "target_weights_pct", {})
@@ -519,6 +559,9 @@ def portfolio_builder(
     if not asset_options:
         st.error("No assets available. Check `cache/assets/list.json`.")
         return None, None
+
+    # Show asset help dropdown
+    _render_asset_help_dropdown()
 
     # Default selections: 60% Stocks, 40% Bonds (find by Short name)
     def _find_asset_by_short(opts: list[str], short_name: str) -> str:
@@ -803,6 +846,9 @@ def _manual_portfolio_builder(
     if not asset_options:
         st.error("No assets available. Check `cache/assets/list.json`.")
         return None
+
+    # Show asset help dropdown
+    _render_asset_help_dropdown()
 
     # Default selections: 60% Stocks, 40% Bonds (find by Short name)
     def _find_asset_by_short(opts: list[str], short_name: str) -> str:
