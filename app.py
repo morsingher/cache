@@ -2,6 +2,7 @@ import contextlib
 import io
 import json
 import os
+import re
 import sys
 import tempfile
 import time
@@ -402,13 +403,19 @@ def _render_asset_help_dropdown() -> None:
             # Handle Link being either a string or a list of strings
             # Use HTML for proper clickable links that open in new tab
             if isinstance(link, list):
-                # Multiple links - show ticker with each link
-                ticker_links = " / ".join([
-                    f'<a href="{l}" target="_blank" style="color: #0066cc; text-decoration: underline;">{ticker}</a>'
-                    for l in link
-                ])
+                # Multiple links - this is a synthetic/composite asset
+                # Make the embedded tickers in the description clickable instead
+                # For ZPRVX: links are [ZPRV_link, ZPRX_link] and description mentions (ZPRV) and (ZPRX)
+                desc_with_links = description
+                # Extract ticker symbols from description that are in parentheses
+                # and replace them with clickable links
+                embedded_tickers = re.findall(r'\(([A-Z0-9]+)\)', description)
+                for i, embedded_ticker in enumerate(embedded_tickers):
+                    if i < len(link):
+                        clickable = f'(<a href="{link[i]}" target="_blank" style="color: #0066cc; text-decoration: underline;">{embedded_ticker}</a>)'
+                        desc_with_links = desc_with_links.replace(f'({embedded_ticker})', clickable, 1)
                 st.markdown(
-                    f"**{name}** ({ticker_links}): {description}",
+                    f"**{name}** ({ticker}): {desc_with_links}",
                     unsafe_allow_html=True
                 )
             elif link:
