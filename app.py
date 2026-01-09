@@ -96,19 +96,55 @@ except Exception:  # pragma: no cover
 # Cache Portfolio objects and price downloads to avoid re-fetching on every widget interaction.
 # TTL of 1 hour ensures data is refreshed periodically but not on every rerun.
 
+def _retry_on_rate_limit(fn, *args, max_retries: int = 5, initial_wait: float = 10.0, **kwargs):
+    """
+    Retry a function on rate limit errors with exponential backoff.
+    Shows a warning toast to the user while waiting.
+    """
+    last_error = None
+    wait_time = initial_wait
+    
+    for attempt in range(max_retries):
+        try:
+            return fn(*args, **kwargs)
+        except Exception as e:
+            error_str = str(e).lower()
+            # Check for rate limit errors (various forms)
+            if "rate" in error_str or "too many requests" in error_str or "429" in error_str:
+                last_error = e
+                if attempt < max_retries - 1:
+                    # Show warning with countdown
+                    st.warning(
+                        f"⏳ Yahoo Finance rate limit hit. Waiting {wait_time:.0f}s before retry "
+                        f"(attempt {attempt + 1}/{max_retries})..."
+                    )
+                    time.sleep(wait_time)
+                    wait_time *= 2  # Exponential backoff
+                else:
+                    # Final attempt failed
+                    raise
+            else:
+                # Not a rate limit error, re-raise immediately
+                raise
+    
+    # Should not reach here, but just in case
+    if last_error:
+        raise last_error
+
+
 @st.cache_resource(ttl=3600, show_spinner="Loading portfolio (downloading price data, may retry on transient errors)...")
 def _cached_load_portfolio(path: str) -> Portfolio:
     """
     Cache the entire Portfolio object (including downloaded prices).
     Uses cache_resource since Portfolio objects are not serializable.
     """
-    return Portfolio.from_json(path)
+    return _retry_on_rate_limit(Portfolio.from_json, path)
 
 
 @st.cache_data(ttl=3600, show_spinner="Downloading price data (may retry on transient errors)...")
 def _cached_download_prices(tickers_tuple: tuple[str, ...]) -> pd.DataFrame:
     """Cached wrapper for Portfolio.download_prices with retry support."""
-    return Portfolio.download_prices(list(tickers_tuple))
+    return _retry_on_rate_limit(Portfolio.download_prices, list(tickers_tuple))
 
 
 st.set_page_config(page_title="CACHE", page_icon="€", layout="centered")
