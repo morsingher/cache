@@ -36,4 +36,4 @@ Evaluate the impact of adding new assets to your portfolio. Analyzes diversifica
 
 ## Acknowledgements
 
-Vibe-coded with Claude Opus-4.5-High and GPT 5.2 xHigh. RRR analysis inspired from [Bridge Alternatives](https://www.bridgealternatives.com/insights/portfolio-intuition).
+Vibe-coded with Claude Opus-4.5-High, GPT 5.2 xHigh and Gemini 3 Pro. RRR analysis inspired from [Bridge Alternatives](https://www.bridgealternatives.com/insights/portfolio-intuition).

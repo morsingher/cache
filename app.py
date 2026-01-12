@@ -167,6 +167,13 @@ def _cached_download_prices(tickers_tuple: tuple[str, ...]) -> pd.DataFrame:
     return _retry_on_rate_limit(Portfolio.download_prices, list(tickers_tuple))
 
 
+@st.cache_data(ttl=3600, show_spinner=False)
+def _cached_get_macro_snapshot(fred_api_key: str | None) -> Any:
+    """Cached wrapper for get_macro_snapshot to avoid rate limits on Cloud."""
+    # This caches the entire MacroSnapshot object (dataclass)
+    return get_macro_snapshot(fred_api_key=fred_api_key, debug=False)
+
+
 st.set_page_config(page_title="CACHE", page_icon="€", layout="centered")
 
 # Register pastel color theme for Altair charts
@@ -692,6 +699,8 @@ def _presort_multiselect_state(*, key: str, sort_by: dict[str, str] | None = Non
 def _render_asset_help_dropdown() -> None:
     """Render a dropdown showing available assets with descriptions and clickable links."""
     assets = _load_available_assets()
+    # Sort assets alphabetically by their full name.
+    assets = sorted(assets, key=lambda a: str(a.get("Name", "")).lower())
     if not assets:
         return
     
@@ -2872,7 +2881,7 @@ This section helps you allocate new cash to your portfolio to move closer to you
                     step_ph.write("Fetching macro data from FRED...")
                     step_start = time.time()
                     
-                    snap = get_macro_snapshot(fred_api_key=fred_api_key, debug=False)
+                    snap = _cached_get_macro_snapshot(fred_api_key=fred_api_key)
                     
                     # Fetch macro chart data
                     macro_charts: dict[str, list[dict[str, object]]] = {"eu_de": [], "us": [], "fx": [], "earnings": []}

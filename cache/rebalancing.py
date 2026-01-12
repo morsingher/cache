@@ -22,9 +22,9 @@ _GLOBAL_ECY_TTL_S: float = 6 * 3600.0  # 6 hours
 
 _US_EY_PROXY_SERIES_IDS: list[str] = [
     # These series IDs may vary by FRED provider; we try in order.
-    # If present, they typically represent an S&P 500 PE ratio level.
+    "SP500PE",  # S&P 500 PE Ratio (if available)
+    "NASDAQ100", # Nasdaq 100 PE (rare)
     "PERATIO",
-    "SP500PE",
     "CAPE",
     "CAPE10",
 ]
@@ -43,6 +43,7 @@ def get_us_earnings_yield_proxy_series_fred(
     Returns:
       (series, note) where note describes the proxy source, or (None, None).
     """
+    # 1. Try standard PE series
     for sid in _US_EY_PROXY_SERIES_IDS:
         s_pe = _try_get_fred_series(fred, sid, debug=debug, observation_start=observation_start)
         if s_pe is None or s_pe.empty:
@@ -57,6 +58,24 @@ def get_us_earnings_yield_proxy_series_fred(
         ey.name = "global_earnings_yield_est_pct"
         note = f"Proxy used: US earnings yield via FRED series '{sid}' (100/PE)."
         return ey, note
+
+    # 2. Fallback: US 10Y Yield as a rough proxy + fixed ERP estimate?
+    # Using 10Y Yield directly is a lower bound, but better than nothing.
+    # Adding a small ERP (e.g. 2.0%) brings it closer to typical earnings yields.
+    # We use "DGS10" (Market Yield on U.S. Treasury Securities at 10-Year Constant Maturity).
+    try:
+        s_10y = _try_get_fred_series(fred, "DGS10", debug=debug, observation_start=observation_start)
+        if s_10y is not None and not s_10y.empty:
+            # Assume 2.5% Equity Risk Premium (ERP)
+            erp_estimate = 2.5
+            ey = (s_10y + erp_estimate).dropna()
+            if not ey.empty:
+                ey.name = "global_earnings_yield_est_pct"
+                note = f"Proxy used: US 10Y Yield (DGS10) + {erp_estimate}% estimated ERP (fallback)."
+                return ey, note
+    except Exception:
+        pass
+
     return None, None
 
 def _get_cached_global_earnings_yield_pct() -> float | None:
@@ -71,39 +90,49 @@ def _get_cached_global_earnings_yield_pct() -> float | None:
 def _set_cached_global_earnings_yield_pct(val: float) -> None:
     _GLOBAL_ECY_CACHE["acwi_ecy"] = (time.time(), float(val))
 
-def _try_get_acwi_earnings_yield_est(debug: bool, max_retries: int = 4, base_delay: float = 0.8) -> float | None:
+def _try_get_acwi_earnings_yield_est(debug: bool, max_retries: int = 3, base_delay: float = 1.0) -> float | None:
     """
     Best-effort global earnings yield estimate via yfinance (ACWI trailing PE).
-
-    yfinance `Ticker().info` is flaky (especially on cold starts / cloud), so:
-    - retry with backoff + jitter
-    - cache last good value (so one transient failure doesn't blank the metric)
+    Fallback to URTH (MSCI World) or SPY (S&P 500) if ACWI info fails.
     """
     cached = _get_cached_global_earnings_yield_pct()
     if cached is not None:
         return cached
 
+    # Candidate tickers to try for PE ratio (in order of preference)
+    tickers = ["ACWI", "URTH", "SPY"]
+    
     last_exc: Exception | None = None
-    for attempt in range(max_retries):
-        try:
-            pe = yf.Ticker("ACWI").info.get("trailingPE")
-            if pe and float(pe) > 0:
-                ecy = (1.0 / float(pe)) * 100.0
-                _set_cached_global_earnings_yield_pct(ecy)
-                return float(ecy)
-        except Exception as e:
-            last_exc = e
-        # backoff (even if pe is missing/0; treat as retryable)
-        if attempt < max_retries - 1:
-            delay = base_delay * (2 ** attempt)
-            delay *= (1.0 + random.uniform(-0.15, 0.15))
-            time.sleep(delay)
+    
+    for ticker_symbol in tickers:
+        for attempt in range(max_retries):
+            try:
+                # Use fast_info first if available (yfinance >= 0.2)
+                # fast_info often has less rate-limiting than .info
+                # However, fast_info doesn't natively expose PE.
+                # So we stick to .info for now, but handle retries carefully.
+                ticker = yf.Ticker(ticker_symbol)
+                pe = ticker.info.get("trailingPE")
+                
+                if pe and float(pe) > 0:
+                    ecy = (1.0 / float(pe)) * 100.0
+                    _set_cached_global_earnings_yield_pct(ecy)
+                    return float(ecy)
+            except Exception as e:
+                last_exc = e
+            
+            # Backoff before retry
+            if attempt < max_retries - 1:
+                delay = base_delay * (2 ** attempt)
+                delay *= (1.0 + random.uniform(-0.15, 0.15))
+                time.sleep(delay)
+        
+        # If we failed all retries for this ticker, try the next ticker
 
     if last_exc is not None:
-        # On Streamlit Cloud, exceptions here are otherwise very easy to miss.
-        logger.warning(f"[macro] Failed to fetch ACWI trailingPE for earnings-yield estimate: {last_exc}")
+        logger.warning(f"[macro] Failed to fetch earnings-yield estimate (tried {tickers}): {last_exc}")
         if debug:
-            print(f"[macro] Failed to fetch ACWI trailingPE for earnings yield estimate: {last_exc}")
+            print(f"[macro] Failed to fetch earnings-yield estimate (tried {tickers}): {last_exc}")
     return None
 
 
@@ -133,84 +162,90 @@ def get_global_earnings_yield_series(*, debug: bool = False, lookback_days: int 
 
     We approximate earnings yield as (trailing EPS / price) and treat trailing EPS as constant
     over the lookback window (reasonable for a simple 12m trend chart).
-
-    This avoids needing a true historical trailing PE/EPS series, which yfinance does not provide reliably.
+    
+    Tries ACWI -> URTH -> SPY.
     """
     cache_key = f"acwi_ecy_series_{int(lookback_days)}"
     cached = _GLOBAL_ECY_SERIES_CACHE.get(cache_key)
     if cached and (time.time() - float(cached[0])) <= float(_GLOBAL_ECY_SERIES_TTL_S):
         return cached[1].copy()
 
-    # Fetch price history for ACWI (close).
-    try:
-        px = yf.download("ACWI", period="max", auto_adjust=True, progress=False)
-        if px is None or px.empty:
-            return None
-        if isinstance(px.columns, pd.MultiIndex):
-            px = px["Close"]
-            if isinstance(px, pd.DataFrame):
-                px = px.iloc[:, 0]
-        elif "Close" in px.columns:
-            px = px["Close"]
-        else:
-            px = px.iloc[:, 0] if len(px.columns) else None
-        if px is None:
-            return None
-        px = pd.to_numeric(px, errors="coerce").dropna().sort_index()
-        if px.empty:
-            return None
-        cutoff = px.index.max() - pd.Timedelta(days=int(lookback_days))
-        px = px.loc[px.index >= cutoff]
-        if px.empty:
-            return None
-    except Exception as e:
-        logger.warning(f"[macro] Failed to download ACWI prices for earnings-yield series: {e}")
-        if debug:
-            print(f"[macro] Failed to download ACWI prices for earnings-yield series: {e}")
-        return None
+    # Tickers to try
+    candidate_tickers = ["ACWI", "URTH", "SPY"]
 
-    # Get trailing EPS (fallback to trailing PE).
-    trailing_eps = None
-    trailing_pe = None
-    last_exc: Exception | None = None
-    for attempt in range(4):
+    for ticker_symbol in candidate_tickers:
+        # 1. Fetch price history
         try:
-            info = yf.Ticker("ACWI").info
-            trailing_eps = info.get("trailingEps")
-            trailing_pe = info.get("trailingPE")
-            break
+            px = yf.download(ticker_symbol, period="max", auto_adjust=True, progress=False)
+            if px is None or px.empty:
+                continue
+            if isinstance(px.columns, pd.MultiIndex):
+                px = px["Close"]
+                if isinstance(px, pd.DataFrame):
+                    px = px.iloc[:, 0]
+            elif "Close" in px.columns:
+                px = px["Close"]
+            else:
+                px = px.iloc[:, 0] if len(px.columns) else None
+            
+            if px is None:
+                continue
+            
+            px = pd.to_numeric(px, errors="coerce").dropna().sort_index()
+            if px.empty:
+                continue
+                
+            cutoff = px.index.max() - pd.Timedelta(days=int(lookback_days))
+            px = px.loc[px.index >= cutoff]
+            if px.empty:
+                continue
         except Exception as e:
-            last_exc = e
-            if attempt < 3:
-                delay = 0.8 * (2 ** attempt)
-                delay *= (1.0 + random.uniform(-0.15, 0.15))
-                time.sleep(delay)
-    if debug and last_exc is not None:
-        print(f"[macro] ACWI info fetch (for EPS/PE) failed: {last_exc}")
-    if last_exc is not None:
-        logger.warning(f"[macro] ACWI info fetch (for EPS/PE) failed: {last_exc}")
+            if debug:
+                print(f"[macro] Failed to download {ticker_symbol} prices: {e}")
+            continue
 
-    eps = None
-    try:
-        if trailing_eps is not None and float(trailing_eps) > 0:
-            eps = float(trailing_eps)
-        elif trailing_pe is not None and float(trailing_pe) > 0:
-            # EPS ≈ Price / PE (use latest price as anchor)
-            eps = float(px.iloc[-1]) / float(trailing_pe)
-    except Exception:
+        # 2. Get trailing EPS (fallback to trailing PE)
+        trailing_eps = None
+        trailing_pe = None
+        
+        # Retry logic for info fetch
+        for attempt in range(3):
+            try:
+                info = yf.Ticker(ticker_symbol).info
+                trailing_eps = info.get("trailingEps")
+                trailing_pe = info.get("trailingPE")
+                if (trailing_eps and float(trailing_eps) > 0) or (trailing_pe and float(trailing_pe) > 0):
+                    break
+            except Exception:
+                if attempt < 2:
+                    time.sleep(1.0 + random.random())
+
         eps = None
+        try:
+            if trailing_eps is not None and float(trailing_eps) > 0:
+                eps = float(trailing_eps)
+            elif trailing_pe is not None and float(trailing_pe) > 0:
+                # EPS ≈ Price / PE (use latest price as anchor)
+                eps = float(px.iloc[-1]) / float(trailing_pe)
+        except Exception:
+            eps = None
 
-    if eps is None or eps <= 0:
-        return None
+        if eps is None or eps <= 0:
+            if debug:
+                print(f"[macro] Could not determine EPS for {ticker_symbol}")
+            continue
 
-    ecy = (float(eps) / px) * 100.0
-    ecy = ecy.replace([np.inf, -np.inf], np.nan).dropna()
-    if ecy.empty:
-        return None
-    ecy.name = "global_earnings_yield_est_pct"
+        # If we got here, we have prices and EPS. Calculate series.
+        ecy = (float(eps) / px) * 100.0
+        ecy = ecy.replace([np.inf, -np.inf], np.nan).dropna()
+        if ecy.empty:
+            continue
+        
+        ecy.name = "global_earnings_yield_est_pct"
+        _GLOBAL_ECY_SERIES_CACHE[cache_key] = (time.time(), ecy.copy())
+        return ecy
 
-    _GLOBAL_ECY_SERIES_CACHE[cache_key] = (time.time(), ecy.copy())
-    return ecy
+    return None
 
 
 def _try_get_fred_series(
