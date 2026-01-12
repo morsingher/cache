@@ -20,6 +20,45 @@ logger = logging.getLogger(__name__)
 _GLOBAL_ECY_CACHE: dict[str, tuple[float, float]] = {}
 _GLOBAL_ECY_TTL_S: float = 6 * 3600.0  # 6 hours
 
+_US_EY_PROXY_SERIES_IDS: list[str] = [
+    # These series IDs may vary by FRED provider; we try in order.
+    # If present, they typically represent an S&P 500 PE ratio level.
+    "PERATIO",
+    "SP500PE",
+    "CAPE",
+    "CAPE10",
+]
+
+
+def get_us_earnings_yield_proxy_series_fred(
+    fred: "Fred",
+    *,
+    debug: bool,
+    observation_start: Any | None = None,
+) -> tuple[pd.Series | None, str | None]:
+    """
+    Best-effort US earnings yield proxy derived from a FRED PE-ratio series:
+      earnings_yield_pct = 100 / PE
+
+    Returns:
+      (series, note) where note describes the proxy source, or (None, None).
+    """
+    for sid in _US_EY_PROXY_SERIES_IDS:
+        s_pe = _try_get_fred_series(fred, sid, debug=debug, observation_start=observation_start)
+        if s_pe is None or s_pe.empty:
+            continue
+        pe = pd.to_numeric(s_pe, errors="coerce").replace([np.inf, -np.inf], np.nan).dropna()
+        pe = pe[pe > 0]
+        if pe.empty:
+            continue
+        ey = (100.0 / pe).replace([np.inf, -np.inf], np.nan).dropna()
+        if ey.empty:
+            continue
+        ey.name = "global_earnings_yield_est_pct"
+        note = f"Proxy used: US earnings yield via FRED series '{sid}' (100/PE)."
+        return ey, note
+    return None, None
+
 def _get_cached_global_earnings_yield_pct() -> float | None:
     ent = _GLOBAL_ECY_CACHE.get("acwi_ecy")
     if not ent:
@@ -60,8 +99,11 @@ def _try_get_acwi_earnings_yield_est(debug: bool, max_retries: int = 4, base_del
             delay *= (1.0 + random.uniform(-0.15, 0.15))
             time.sleep(delay)
 
-    if debug and last_exc is not None:
-        print(f"[macro] Failed to fetch ACWI trailingPE for earnings yield estimate: {last_exc}")
+    if last_exc is not None:
+        # On Streamlit Cloud, exceptions here are otherwise very easy to miss.
+        logger.warning(f"[macro] Failed to fetch ACWI trailingPE for earnings-yield estimate: {last_exc}")
+        if debug:
+            print(f"[macro] Failed to fetch ACWI trailingPE for earnings yield estimate: {last_exc}")
     return None
 
 
@@ -75,6 +117,7 @@ class MacroSnapshot:
     us_10y_yield_pct: float | None
     us_cpi_yoy_pct: float | None
     global_earnings_yield_est_pct: float | None
+    global_earnings_yield_note: str | None
     usd_eur_spot: float | None
     usd_eur_3m_ago: float | None
     usd_eur_6m_ago: float | None
@@ -121,6 +164,7 @@ def get_global_earnings_yield_series(*, debug: bool = False, lookback_days: int 
         if px.empty:
             return None
     except Exception as e:
+        logger.warning(f"[macro] Failed to download ACWI prices for earnings-yield series: {e}")
         if debug:
             print(f"[macro] Failed to download ACWI prices for earnings-yield series: {e}")
         return None
@@ -143,6 +187,8 @@ def get_global_earnings_yield_series(*, debug: bool = False, lookback_days: int 
                 time.sleep(delay)
     if debug and last_exc is not None:
         print(f"[macro] ACWI info fetch (for EPS/PE) failed: {last_exc}")
+    if last_exc is not None:
+        logger.warning(f"[macro] ACWI info fetch (for EPS/PE) failed: {last_exc}")
 
     eps = None
     try:
@@ -328,14 +374,24 @@ def get_macro_snapshot(fred_api_key: str | None = None, debug: bool = False) -> 
             usd_eur_12m = _asof(12)
 
     # Global earnings yield estimate (best-effort; non-critical).
+    global_note: str | None = None
     global_ecy = _try_get_acwi_earnings_yield_est(debug=debug)
     # If we can build a series, prefer its latest point for consistency with the trend chart.
     try:
         s_ecy = get_global_earnings_yield_series(debug=debug, lookback_days=500)
         if s_ecy is not None and not s_ecy.empty:
             global_ecy = float(s_ecy.iloc[-1])
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning(f"[macro] get_global_earnings_yield_series failed in snapshot: {e}")
+
+    # If Yahoo-based global estimate is unavailable, fall back to a US proxy via FRED (and note it).
+    if global_ecy is None:
+        s_us_ey, note = get_us_earnings_yield_proxy_series_fred(
+            fred, debug=debug, observation_start=obs_start
+        )
+        if s_us_ey is not None and not s_us_ey.empty:
+            global_ecy = float(s_us_ey.iloc[-1])
+            global_note = note
 
     return MacroSnapshot(
         asof=asof,
@@ -346,6 +402,7 @@ def get_macro_snapshot(fred_api_key: str | None = None, debug: bool = False) -> 
         us_10y_yield_pct=us_10y,
         us_cpi_yoy_pct=us_cpi_yoy,
         global_earnings_yield_est_pct=global_ecy,
+        global_earnings_yield_note=global_note,
         usd_eur_spot=usd_eur_spot,
         usd_eur_3m_ago=usd_eur_3m,
         usd_eur_6m_ago=usd_eur_6m,
@@ -377,6 +434,8 @@ def print_macro_overview(fred_api_key: str | None = None, debug: bool = False) -
         print(f"US CPI YoY: {snap.us_cpi_yoy_pct:.2f}%")
     if snap.global_earnings_yield_est_pct is not None:
         print(f"Global Earnings Yield (est.): {snap.global_earnings_yield_est_pct:.2f}%")
+        if snap.global_earnings_yield_note:
+            print(f"  Note: {snap.global_earnings_yield_note}")
 
     if snap.usd_eur_spot is not None:
         def _fmt_change(past: float | None) -> str:
@@ -635,6 +694,8 @@ def build_llm_rebalance_report(
             macro_lines.append(f"  US inflation YoY: {macro_snapshot.us_cpi_yoy_pct:.2f}%")
         if macro_snapshot.global_earnings_yield_est_pct is not None:
             macro_lines.append(f"  Global earnings yield (est.): {macro_snapshot.global_earnings_yield_est_pct:.2f}%")
+            if getattr(macro_snapshot, "global_earnings_yield_note", None):
+                macro_lines.append(f"    Note: {macro_snapshot.global_earnings_yield_note}")
 
         # Add historical trends if available
         if macro_trends:

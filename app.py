@@ -74,6 +74,7 @@ from rebalancing import (  # noqa: E402
     get_macro_snapshot,
     build_llm_rebalance_report,
     get_global_earnings_yield_series,
+    get_us_earnings_yield_proxy_series_fred,
 )
 from whatif import (  # noqa: E402
     _apply_swap_from_stocks,
@@ -2947,6 +2948,14 @@ This section helps you allocate new cash to your portfolio to move closer to you
                                     ecy_12m = ecy.loc[ecy.index >= one_year_ago]
                                     _append_series("earnings", label="Global EY Est. (%)", series=ecy_12m)
                                     macro_trends["global_earnings_yield_est_pct"] = _trend_vals(ecy)
+                                else:
+                                    s_us_ey, _note = get_us_earnings_yield_proxy_series_fred(
+                                        fred, debug=False, observation_start=obs_start
+                                    )
+                                    if s_us_ey is not None and not s_us_ey.empty:
+                                        s_us_ey_12m = s_us_ey.loc[s_us_ey.index >= one_year_ago]
+                                        _append_series("earnings", label="US EY Proxy (FRED, %)", series=s_us_ey_12m)
+                                        macro_trends["global_earnings_yield_est_pct"] = _trend_vals(s_us_ey)
                             except Exception:
                                 pass
                         except Exception:
@@ -3133,6 +3142,10 @@ These diagnostics help you understand recent portfolio behavior over the last ~1
                 r2[1].metric("US 10Y Yield", _fmt_pct(snap.us_10y_yield_pct))
                 r2[2].metric("US Inflation YoY", _fmt_pct(snap.us_cpi_yoy_pct))
                 r2[3].metric("Global EY (est.)", _fmt_pct(snap.global_earnings_yield_est_pct))
+
+                proxy_note = getattr(snap, "global_earnings_yield_note", None)
+                if proxy_note:
+                    st.info(proxy_note)
                 
                 with st.expander("ℹ️ What do these indicators mean?", expanded=False):
                     st.markdown("""
@@ -3153,6 +3166,8 @@ These indicators provide macro context (rates, inflation, FX, valuations) for re
 **US Inflation YoY** — US CPI year-over-year.
 
 **Global Earnings Yield (est.)** — A simple valuation proxy for global equities (higher can imply “cheaper” equities vs bonds).
+
+If the global estimate is unavailable (Yahoo fundamentals can be flaky on Streamlit Cloud), the app may fall back to a **US earnings-yield proxy from FRED**. When that happens, you'll see an explicit note in the UI.
                     """)
 
 
