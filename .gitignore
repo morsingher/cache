@@ -3,6 +3,7 @@ cache/TODO.txt
 *.pdf
 *.png
 .streamlit/secrets.toml
+taa/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

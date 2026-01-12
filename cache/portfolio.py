@@ -1,5 +1,7 @@
 import time
 import logging
+import random
+from dataclasses import dataclass
 
 import yfinance as yf
 import pandas as pd
@@ -12,6 +14,29 @@ import json
 # Configure logging for retry attempts
 logger = logging.getLogger(__name__)
 
+@dataclass(frozen=True)
+class _CacheEntry:
+    ts: float
+    df: pd.DataFrame
+
+# In-process price cache to avoid repeated yfinance calls on Streamlit reruns.
+# Streamlit's own caching isn't used when Portfolio is instantiated directly, so this helps.
+_PRICES_CACHE: dict[tuple, _CacheEntry] = {}
+_PRICES_CACHE_TTL_S: float = 3600.0
+
+def _cache_get(key: tuple) -> pd.DataFrame | None:
+    ent = _PRICES_CACHE.get(key)
+    if ent is None:
+        return None
+    if (time.time() - float(ent.ts)) > float(_PRICES_CACHE_TTL_S):
+        _PRICES_CACHE.pop(key, None)
+        return None
+    # Return a copy to avoid accidental mutation of cached object.
+    return ent.df.copy()
+
+def _cache_set(key: tuple, df: pd.DataFrame) -> None:
+    _PRICES_CACHE[key] = _CacheEntry(ts=time.time(), df=df.copy())
+
 
 def _retry_yf_download(
     tickers: list[str],
@@ -23,6 +48,7 @@ def _retry_yf_download(
     threads: bool = True,
     max_retries: int = 4,
     base_delay: float = 1.0,
+    jitter: float = 0.15,
 ) -> pd.DataFrame | None:
     """
     Wrapper around yf.download with retry logic and exponential backoff.
@@ -101,6 +127,8 @@ def _retry_yf_download(
             
             if attempt < max_retries - 1 and retryable:
                 delay = base_delay * (2 ** attempt)  # Exponential backoff
+                # Small jitter helps on cold-start stampedes (Streamlit Cloud).
+                delay *= (1.0 + random.uniform(-jitter, jitter))
                 logger.warning(
                     f"yfinance download failed for {tickers} (attempt {attempt + 1}/{max_retries}): {e}. "
                     f"Retrying in {delay:.1f}s..."
@@ -210,6 +238,17 @@ class Portfolio:
         if not tickers:
             return pd.DataFrame()
 
+        cache_key = (
+            "download_prices_v2",
+            tuple(tickers),
+            str(period),
+            bool(auto_adjust),
+            bool(ignore_tz),
+        )
+        cached = _cache_get(cache_key)
+        if cached is not None and not cached.empty:
+            return cached.reindex(columns=tickers)
+
         # Optional DBMF stitched series (kept here so we can eventually delete commodities.py).
         dbmf_series = None
         if "DBMF" in tickers:
@@ -254,8 +293,31 @@ class Portfolio:
         if zprvx_series is not None and "ZPRVX" in tickers_to_download:
             tickers_to_download = [t for t in tickers_to_download if t != "ZPRVX"]
 
-        raw = None
+        def _raw_to_prices(raw_df: pd.DataFrame, requested: list[str]) -> pd.DataFrame:
+            if not requested:
+                return pd.DataFrame()
+            if len(requested) > 1:
+                px = raw_df["Close"]
+                if isinstance(px, pd.Series):
+                    # Defensive: yfinance oddity; coerce to DataFrame
+                    px = px.to_frame()
+                if isinstance(px.columns, pd.MultiIndex):
+                    px.columns = px.columns.get_level_values(-1)
+                return px
+            # Single ticker case: yfinance may return MultiIndex.
+            only = requested[0]
+            if isinstance(raw_df.columns, pd.MultiIndex):
+                close_data = raw_df["Close"]
+                if isinstance(close_data, pd.Series):
+                    return close_data.to_frame(name=only)
+                out = close_data.copy()
+                out.columns = [only]
+                return out
+            return raw_df[["Close"]].rename(columns={"Close": only})
+
+        prices = pd.DataFrame()
         if tickers_to_download:
+            # First bulk attempt
             raw = _retry_yf_download(
                 tickers_to_download,
                 period=period,
@@ -263,29 +325,31 @@ class Portfolio:
                 ignore_tz=ignore_tz,
                 progress=progress,
                 threads=threads,
-                max_retries=4,
+                max_retries=6,
                 base_delay=1.0,
             )
+            prices = _raw_to_prices(raw, tickers_to_download)
 
-        if not tickers_to_download:
-            prices = pd.DataFrame()
-        elif len(tickers_to_download) > 1:
-            prices = raw["Close"]
-        else:
-            # Single ticker case: yfinance may return a MultiIndex DataFrame.
-            # We need to flatten it to a single-level column structure before joining.
-            only = tickers_to_download[0]
-            if isinstance(raw.columns, pd.MultiIndex):
-                # Extract the Close prices - may be Series or DataFrame depending on yfinance version
-                close_data = raw["Close"]
-                if isinstance(close_data, pd.Series):
-                    prices = close_data.to_frame(name=only)
-                else:
-                    # It's a DataFrame, flatten columns and rename
-                    prices = close_data.copy()
-                    prices.columns = [only]
-            else:
-                prices = raw[["Close"]].rename(columns={"Close": only})
+            # IMPORTANT: yfinance can return a valid frame but with a subset of tickers all-NaN on cold start.
+            # Retry missing tickers individually and merge.
+            missing = [t for t in tickers_to_download if t not in prices.columns or prices[t].dropna().empty]
+            if missing:
+                logger.warning(f"yfinance returned empty series for tickers {missing}; retrying individually...")
+                for t in missing:
+                    raw_t = _retry_yf_download(
+                        [t],
+                        period=period,
+                        auto_adjust=auto_adjust,
+                        ignore_tz=ignore_tz,
+                        progress=progress,
+                        threads=False,
+                        max_retries=6,
+                        base_delay=1.0,
+                    )
+                    px_t = _raw_to_prices(raw_t, [t])
+                    # If still empty, keep as NaN column; downstream will raise a clear error.
+                    if not px_t.empty and t in px_t.columns and not px_t[t].dropna().empty:
+                        prices = prices.drop(columns=[c for c in [t] if c in prices.columns]).join(px_t, how="outer")
 
         # Ensure prices has a flat column structure before joining synthetic series
         if isinstance(prices.columns, pd.MultiIndex):
@@ -299,6 +363,8 @@ class Portfolio:
 
         # Keep columns in requested order (and drop extras).
         prices = prices.reindex(columns=tickers)
+        if not prices.empty:
+            _cache_set(cache_key, prices)
         return prices
 
     @staticmethod
@@ -434,7 +500,13 @@ class Portfolio:
             return pd.Series(dtype=float, name="portfolio_value")
 
         w = pd.Series(weights, dtype=float)
-        if (w < 0).any() or float(w.sum()) <= 0:
+        # Tolerate tiny negative weights caused by floating point arithmetic
+        # (common when user swaps exactly X% out of an asset).
+        eps = 1e-12
+        if (w < -eps).any():
+            raise ValueError("Weights must be non-negative and sum to > 0.")
+        w = w.clip(lower=0.0)
+        if float(w.sum()) <= 0:
             raise ValueError("Weights must be non-negative and sum to > 0.")
         w = w / float(w.sum())
         wv = w.reindex(cols).to_numpy(dtype=float)

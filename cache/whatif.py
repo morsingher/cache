@@ -76,8 +76,16 @@ def _apply_swap_from_stocks(
         share = float(base_target_weights[t]) / stocks_total
         new_w[t] = float(new_w[t]) - float(swap_weight) * share
     new_w[add_ticker] = float(swap_weight)
-    # normalize (numerical safety)
+    # Numerical safety: clip tiny negatives (floating point) and re-normalize.
+    eps = 1e-12
+    for k, v in list(new_w.items()):
+        if float(v) < -eps:
+            raise ValueError("Weights must be non-negative and sum to > 0.")
+        if float(v) < 0:
+            new_w[k] = 0.0
     total = float(sum(new_w.values()))
+    if total <= 0:
+        raise ValueError("Weights must be non-negative and sum to > 0.")
     return {k: float(v) / total for k, v in new_w.items()}
 
 

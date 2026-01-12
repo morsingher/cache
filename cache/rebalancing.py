@@ -1,6 +1,7 @@
 import logging
 import os
 import time
+import random
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -16,26 +17,161 @@ except Exception:
 
 logger = logging.getLogger(__name__)
 
+_GLOBAL_ECY_CACHE: dict[str, tuple[float, float]] = {}
+_GLOBAL_ECY_TTL_S: float = 6 * 3600.0  # 6 hours
+
+def _get_cached_global_earnings_yield_pct() -> float | None:
+    ent = _GLOBAL_ECY_CACHE.get("acwi_ecy")
+    if not ent:
+        return None
+    ts, val = ent
+    if (time.time() - float(ts)) > float(_GLOBAL_ECY_TTL_S):
+        return None
+    return float(val)
+
+def _set_cached_global_earnings_yield_pct(val: float) -> None:
+    _GLOBAL_ECY_CACHE["acwi_ecy"] = (time.time(), float(val))
+
+def _try_get_acwi_earnings_yield_est(debug: bool, max_retries: int = 4, base_delay: float = 0.8) -> float | None:
+    """
+    Best-effort global earnings yield estimate via yfinance (ACWI trailing PE).
+
+    yfinance `Ticker().info` is flaky (especially on cold starts / cloud), so:
+    - retry with backoff + jitter
+    - cache last good value (so one transient failure doesn't blank the metric)
+    """
+    cached = _get_cached_global_earnings_yield_pct()
+    if cached is not None:
+        return cached
+
+    last_exc: Exception | None = None
+    for attempt in range(max_retries):
+        try:
+            pe = yf.Ticker("ACWI").info.get("trailingPE")
+            if pe and float(pe) > 0:
+                ecy = (1.0 / float(pe)) * 100.0
+                _set_cached_global_earnings_yield_pct(ecy)
+                return float(ecy)
+        except Exception as e:
+            last_exc = e
+        # backoff (even if pe is missing/0; treat as retryable)
+        if attempt < max_retries - 1:
+            delay = base_delay * (2 ** attempt)
+            delay *= (1.0 + random.uniform(-0.15, 0.15))
+            time.sleep(delay)
+
+    if debug and last_exc is not None:
+        print(f"[macro] Failed to fetch ACWI trailingPE for earnings yield estimate: {last_exc}")
+    return None
+
 
 @dataclass(frozen=True)
 class MacroSnapshot:
     asof: pd.Timestamp
     ecb_dfr_pct: float | None
-    usd_10y_tips_yield_pct: float | None
     de_10y_yield_pct: float | None
     de_cpi_yoy_pct: float | None
-    de_10y_real_yield_proxy_pct: float | None
+    fed_rf_pct: float | None
+    us_10y_yield_pct: float | None
+    us_cpi_yoy_pct: float | None
     global_earnings_yield_est_pct: float | None
-    eurusd_spot: float | None
-    eurusd_3m_ago: float | None
-    eurusd_6m_ago: float | None
-    eurusd_12m_ago: float | None
+    usd_eur_spot: float | None
+    usd_eur_3m_ago: float | None
+    usd_eur_6m_ago: float | None
+    usd_eur_12m_ago: float | None
+
+
+_GLOBAL_ECY_SERIES_CACHE: dict[str, tuple[float, pd.Series]] = {}
+_GLOBAL_ECY_SERIES_TTL_S: float = 6 * 3600.0  # 6 hours
+
+def get_global_earnings_yield_series(*, debug: bool = False, lookback_days: int = 500) -> pd.Series | None:
+    """
+    Best-effort *time series* for "global earnings yield (est.)".
+
+    We approximate earnings yield as (trailing EPS / price) and treat trailing EPS as constant
+    over the lookback window (reasonable for a simple 12m trend chart).
+
+    This avoids needing a true historical trailing PE/EPS series, which yfinance does not provide reliably.
+    """
+    cache_key = f"acwi_ecy_series_{int(lookback_days)}"
+    cached = _GLOBAL_ECY_SERIES_CACHE.get(cache_key)
+    if cached and (time.time() - float(cached[0])) <= float(_GLOBAL_ECY_SERIES_TTL_S):
+        return cached[1].copy()
+
+    # Fetch price history for ACWI (close).
+    try:
+        px = yf.download("ACWI", period="max", auto_adjust=True, progress=False)
+        if px is None or px.empty:
+            return None
+        if isinstance(px.columns, pd.MultiIndex):
+            px = px["Close"]
+            if isinstance(px, pd.DataFrame):
+                px = px.iloc[:, 0]
+        elif "Close" in px.columns:
+            px = px["Close"]
+        else:
+            px = px.iloc[:, 0] if len(px.columns) else None
+        if px is None:
+            return None
+        px = pd.to_numeric(px, errors="coerce").dropna().sort_index()
+        if px.empty:
+            return None
+        cutoff = px.index.max() - pd.Timedelta(days=int(lookback_days))
+        px = px.loc[px.index >= cutoff]
+        if px.empty:
+            return None
+    except Exception as e:
+        if debug:
+            print(f"[macro] Failed to download ACWI prices for earnings-yield series: {e}")
+        return None
+
+    # Get trailing EPS (fallback to trailing PE).
+    trailing_eps = None
+    trailing_pe = None
+    last_exc: Exception | None = None
+    for attempt in range(4):
+        try:
+            info = yf.Ticker("ACWI").info
+            trailing_eps = info.get("trailingEps")
+            trailing_pe = info.get("trailingPE")
+            break
+        except Exception as e:
+            last_exc = e
+            if attempt < 3:
+                delay = 0.8 * (2 ** attempt)
+                delay *= (1.0 + random.uniform(-0.15, 0.15))
+                time.sleep(delay)
+    if debug and last_exc is not None:
+        print(f"[macro] ACWI info fetch (for EPS/PE) failed: {last_exc}")
+
+    eps = None
+    try:
+        if trailing_eps is not None and float(trailing_eps) > 0:
+            eps = float(trailing_eps)
+        elif trailing_pe is not None and float(trailing_pe) > 0:
+            # EPS ≈ Price / PE (use latest price as anchor)
+            eps = float(px.iloc[-1]) / float(trailing_pe)
+    except Exception:
+        eps = None
+
+    if eps is None or eps <= 0:
+        return None
+
+    ecy = (float(eps) / px) * 100.0
+    ecy = ecy.replace([np.inf, -np.inf], np.nan).dropna()
+    if ecy.empty:
+        return None
+    ecy.name = "global_earnings_yield_est_pct"
+
+    _GLOBAL_ECY_SERIES_CACHE[cache_key] = (time.time(), ecy.copy())
+    return ecy
 
 
 def _try_get_fred_series(
     fred: "Fred",
     series_id: str,
     debug: bool,
+    observation_start: Any | None = None,
     max_retries: int = 6,
     base_delay: float = 0.5,
 ) -> pd.Series | None:
@@ -46,7 +182,10 @@ def _try_get_fred_series(
     
     for attempt in range(max_retries):
         try:
-            s = fred.get_series(series_id)
+            if observation_start is not None:
+                s = fred.get_series(series_id, observation_start=observation_start)
+            else:
+                s = fred.get_series(series_id)
             if isinstance(s, pd.Series):
                 return s.dropna()
             return None
@@ -89,11 +228,13 @@ def get_macro_snapshot(fred_api_key: str | None = None, debug: bool = False) -> 
     Uses FRED if available and API key is provided (arg or env var FRED_API_KEY).
     Series used (best-effort):
       - ECB deposit facility rate (ECBDFR) (%)
-      - US 10Y TIPS real yield (DFII10) (%)
       - Germany 10Y yield (IRLTLT01DEM156N) (%)
       - Germany CPI (DEUCPIALLMINMEI) (index, monthly) -> YoY inflation (%)
-      - EUR/USD spot (DEXUSEU)
-      - Global earnings yield estimate from ACWI trailing P/E (best-effort)
+      - USD/EUR spot (DEXUSEU) (USD per 1 EUR)
+      - Fed risk-free proxy (EFFR) (%)
+      - US 10Y yield (DGS10) (%)
+      - US CPI (CPIAUCSL) (index, monthly) -> YoY inflation (%)
+      - Global earnings yield estimate (best-effort, derived from ACWI)
     """
     if Fred is None:
         if debug:
@@ -108,23 +249,31 @@ def get_macro_snapshot(fred_api_key: str | None = None, debug: bool = False) -> 
 
     fred = Fred(api_key=api_key)
 
-    s_ecb_dfr = _try_get_fred_series(fred, "ECBDFR", debug=debug)  # %
-    s_us_tips_10y = _try_get_fred_series(fred, "DFII10", debug=debug)  # %
-    s_de_10y = _try_get_fred_series(fred, "IRLTLT01DEM156N", debug=debug)  # %
-    s_de_cpi = _try_get_fred_series(fred, "DEUCPIALLMINMEI", debug=debug)  # index
-    s_eurusd = _try_get_fred_series(fred, "DEXUSEU", debug=debug)  # EUR/USD
+    # Pull ~2y to compute YoY inflation reliably and to support 12m trend charts elsewhere.
+    obs_start = pd.Timestamp.now() - pd.DateOffset(months=26)
+    s_ecb_dfr = _try_get_fred_series(fred, "ECBDFR", debug=debug, observation_start=obs_start)  # %
+    s_de_10y = _try_get_fred_series(fred, "IRLTLT01DEM156N", debug=debug, observation_start=obs_start)  # %
+    s_de_cpi = _try_get_fred_series(fred, "DEUCPIALLMINMEI", debug=debug, observation_start=obs_start)  # index
+    s_usd_eur = _try_get_fred_series(fred, "DEXUSEU", debug=debug, observation_start=obs_start)  # USD per 1 EUR
+    s_fed_rf = _try_get_fred_series(fred, "EFFR", debug=debug, observation_start=obs_start)  # %
+    s_us_10y = _try_get_fred_series(fred, "DGS10", debug=debug, observation_start=obs_start)  # %
+    s_us_cpi = _try_get_fred_series(fred, "CPIAUCSL", debug=debug, observation_start=obs_start)  # index
 
     cols: dict[str, pd.Series] = {}
     if s_ecb_dfr is not None:
         cols["ecb_dfr_pct"] = pd.to_numeric(s_ecb_dfr, errors="coerce")
-    if s_us_tips_10y is not None:
-        cols["usd_10y_tips_yield_pct"] = pd.to_numeric(s_us_tips_10y, errors="coerce")
     if s_de_10y is not None:
         cols["de_10y_yield_pct"] = pd.to_numeric(s_de_10y, errors="coerce")
     if s_de_cpi is not None:
         cols["de_cpi_idx"] = pd.to_numeric(s_de_cpi, errors="coerce")
-    if s_eurusd is not None:
-        cols["eurusd"] = pd.to_numeric(s_eurusd, errors="coerce")
+    if s_usd_eur is not None:
+        cols["usd_eur"] = pd.to_numeric(s_usd_eur, errors="coerce")
+    if s_fed_rf is not None:
+        cols["fed_rf_pct"] = pd.to_numeric(s_fed_rf, errors="coerce")
+    if s_us_10y is not None:
+        cols["us_10y_yield_pct"] = pd.to_numeric(s_us_10y, errors="coerce")
+    if s_us_cpi is not None:
+        cols["us_cpi_idx"] = pd.to_numeric(s_us_cpi, errors="coerce")
 
     if not cols:
         return None
@@ -136,66 +285,71 @@ def get_macro_snapshot(fred_api_key: str | None = None, debug: bool = False) -> 
     asof = pd.Timestamp(df.index.max())
 
     ecb_dfr = float(df["ecb_dfr_pct"].iloc[-1]) if "ecb_dfr_pct" in df.columns else None
-    us_tips_10y = float(df["usd_10y_tips_yield_pct"].iloc[-1]) if "usd_10y_tips_yield_pct" in df.columns else None
     de_10y = float(df["de_10y_yield_pct"].iloc[-1]) if "de_10y_yield_pct" in df.columns else None
+    fed_rf = float(df["fed_rf_pct"].iloc[-1]) if "fed_rf_pct" in df.columns else None
+    us_10y = float(df["us_10y_yield_pct"].iloc[-1]) if "us_10y_yield_pct" in df.columns else None
 
     de_cpi_yoy = None
-    de_real_proxy = None
     # IMPORTANT: compute CPI YoY on the original CPI series, not on the merged/ffilled dataframe.
     # Otherwise pct_change(12) can accidentally mean "12 days" if the index became daily.
-    if s_de_cpi is not None and s_de_10y is not None:
+    if s_de_cpi is not None:
         cpi = pd.to_numeric(s_de_cpi, errors="coerce").dropna()
-        nom = pd.to_numeric(s_de_10y, errors="coerce").dropna()
-        if cpi.shape[0] >= 13 and nom.shape[0] >= 2:
+        if cpi.shape[0] >= 13:
             infl_yoy = cpi.pct_change(12) * 100.0  # monthly YoY (%)
             infl_yoy = infl_yoy.dropna()
-            # Align on time and forward-fill monthly inflation to match nominal yield dates.
-            aligned = pd.DataFrame({"nom": nom, "infl_yoy": infl_yoy}).sort_index().ffill().dropna()
-            if not aligned.empty:
-                de_cpi_yoy = float(aligned["infl_yoy"].iloc[-1])
-                de_real_proxy = float(aligned["nom"].iloc[-1] - aligned["infl_yoy"].iloc[-1])
+            if not infl_yoy.empty:
+                de_cpi_yoy = float(infl_yoy.iloc[-1])
 
-    eurusd_spot = float(df["eurusd"].iloc[-1]) if "eurusd" in df.columns else None
+    us_cpi_yoy = None
+    if s_us_cpi is not None:
+        cpi = pd.to_numeric(s_us_cpi, errors="coerce").dropna()
+        if cpi.shape[0] >= 13:
+            infl_yoy = (cpi.pct_change(12) * 100.0).dropna()
+            if not infl_yoy.empty:
+                us_cpi_yoy = float(infl_yoy.iloc[-1])
 
-    eurusd_3m = eurusd_6m = eurusd_12m = None
-    if "eurusd" in df.columns:
-        eurusd_daily = df["eurusd"].asfreq("D").ffill().dropna()
-        if not eurusd_daily.empty:
-            end = eurusd_daily.index.max()
+    usd_eur_spot = float(df["usd_eur"].iloc[-1]) if "usd_eur" in df.columns else None
+
+    usd_eur_3m = usd_eur_6m = usd_eur_12m = None
+    if "usd_eur" in df.columns:
+        usd_eur_daily = df["usd_eur"].asfreq("D").ffill().dropna()
+        if not usd_eur_daily.empty:
+            end = usd_eur_daily.index.max()
 
             def _asof(months: int) -> float | None:
                 target = end - pd.DateOffset(months=months)
-                sub = eurusd_daily.loc[:target]
+                sub = usd_eur_daily.loc[:target]
                 if sub.empty:
                     return None
                 return float(sub.iloc[-1])
 
-            eurusd_3m = _asof(3)
-            eurusd_6m = _asof(6)
-            eurusd_12m = _asof(12)
+            usd_eur_3m = _asof(3)
+            usd_eur_6m = _asof(6)
+            usd_eur_12m = _asof(12)
 
-    # Global earnings yield estimate from ACWI trailing P/E (best-effort).
-    global_ecy = None
+    # Global earnings yield estimate (best-effort; non-critical).
+    global_ecy = _try_get_acwi_earnings_yield_est(debug=debug)
+    # If we can build a series, prefer its latest point for consistency with the trend chart.
     try:
-        pe = yf.Ticker("ACWI").info.get("trailingPE")
-        if pe and float(pe) > 0:
-            global_ecy = (1.0 / float(pe)) * 100.0
-    except Exception as e:
-        if debug:
-            print(f"[macro] Failed to fetch ACWI trailingPE for earnings yield estimate: {e}")
+        s_ecy = get_global_earnings_yield_series(debug=debug, lookback_days=500)
+        if s_ecy is not None and not s_ecy.empty:
+            global_ecy = float(s_ecy.iloc[-1])
+    except Exception:
+        pass
 
     return MacroSnapshot(
         asof=asof,
         ecb_dfr_pct=ecb_dfr,
-        usd_10y_tips_yield_pct=us_tips_10y,
         de_10y_yield_pct=de_10y,
         de_cpi_yoy_pct=de_cpi_yoy,
-        de_10y_real_yield_proxy_pct=de_real_proxy,
+        fed_rf_pct=fed_rf,
+        us_10y_yield_pct=us_10y,
+        us_cpi_yoy_pct=us_cpi_yoy,
         global_earnings_yield_est_pct=global_ecy,
-        eurusd_spot=eurusd_spot,
-        eurusd_3m_ago=eurusd_3m,
-        eurusd_6m_ago=eurusd_6m,
-        eurusd_12m_ago=eurusd_12m,
+        usd_eur_spot=usd_eur_spot,
+        usd_eur_3m_ago=usd_eur_3m,
+        usd_eur_6m_ago=usd_eur_6m,
+        usd_eur_12m_ago=usd_eur_12m,
     )
 
 
@@ -206,31 +360,36 @@ def print_macro_overview(fred_api_key: str | None = None, debug: bool = False) -
         return
 
     print(f"MACRO OVERVIEW (as of: {snap.asof.date().isoformat()})\n")
-    if snap.global_earnings_yield_est_pct is not None:
-        print(f"Global Earnings Yield (est., ACWI 1/PE): {snap.global_earnings_yield_est_pct:.2f}%")
-    if snap.usd_10y_tips_yield_pct is not None:
-        print(f"US 10Y TIPS Yield: {snap.usd_10y_tips_yield_pct:.2f}%")
     if snap.ecb_dfr_pct is not None:
         print(f"ECB Deposit Facility Rate: {snap.ecb_dfr_pct:.2f}%")
     if snap.de_10y_yield_pct is not None:
         print(f"DE 10Y Yield: {snap.de_10y_yield_pct:.2f}%")
     if snap.de_cpi_yoy_pct is not None:
         print(f"DE CPI YoY: {snap.de_cpi_yoy_pct:.2f}%")
-    if snap.de_10y_real_yield_proxy_pct is not None:
-        print(f"DE 10Y Real Yield Proxy (nominal - CPI YoY): {snap.de_10y_real_yield_proxy_pct:.2f}%")
-    if snap.eurusd_spot is not None:
-        print(f"EUR/USD: {snap.eurusd_spot:.4f}")
+    if snap.usd_eur_spot is not None:
+        print(f"USD/EUR: {snap.usd_eur_spot:.4f}")
+
+    if snap.fed_rf_pct is not None:
+        print(f"Fed risk-free rate (EFFR): {snap.fed_rf_pct:.2f}%")
+    if snap.us_10y_yield_pct is not None:
+        print(f"US 10Y Yield: {snap.us_10y_yield_pct:.2f}%")
+    if snap.us_cpi_yoy_pct is not None:
+        print(f"US CPI YoY: {snap.us_cpi_yoy_pct:.2f}%")
+    if snap.global_earnings_yield_est_pct is not None:
+        print(f"Global Earnings Yield (est.): {snap.global_earnings_yield_est_pct:.2f}%")
+
+    if snap.usd_eur_spot is not None:
         def _fmt_change(past: float | None) -> str:
             if past is None:
                 return ""
-            change = (snap.eurusd_spot / past - 1.0) * 100.0
+            change = (snap.usd_eur_spot / past - 1.0) * 100.0
             return f" ({change:+.2f}%)"
-        if snap.eurusd_3m_ago is not None:
-            print(f"EUR/USD (3m ago): {snap.eurusd_3m_ago:.4f}{_fmt_change(snap.eurusd_3m_ago)}")
-        if snap.eurusd_6m_ago is not None:
-            print(f"EUR/USD (6m ago): {snap.eurusd_6m_ago:.4f}{_fmt_change(snap.eurusd_6m_ago)}")
-        if snap.eurusd_12m_ago is not None:
-            print(f"EUR/USD (12m ago): {snap.eurusd_12m_ago:.4f}{_fmt_change(snap.eurusd_12m_ago)}")
+        if snap.usd_eur_3m_ago is not None:
+            print(f"USD/EUR (3m ago): {snap.usd_eur_3m_ago:.4f}{_fmt_change(snap.usd_eur_3m_ago)}")
+        if snap.usd_eur_6m_ago is not None:
+            print(f"USD/EUR (6m ago): {snap.usd_eur_6m_ago:.4f}{_fmt_change(snap.usd_eur_6m_ago)}")
+        if snap.usd_eur_12m_ago is not None:
+            print(f"USD/EUR (12m ago): {snap.usd_eur_12m_ago:.4f}{_fmt_change(snap.usd_eur_12m_ago)}")
 
 
 def ewma_volatility_lambda(log_returns_series: pd.Series, lam: float = 0.94) -> float:
@@ -303,20 +462,16 @@ def compute_rebalancing_diagnostics(
     else:
         # Download external stocks data for correlation computation
         try:
-            external_stocks_prices = yf.download(
-                DEFAULT_STOCKS_TICKER,
-                period="max",
-                auto_adjust=True,
-                progress=False,
-            )
-            if isinstance(external_stocks_prices.columns, pd.MultiIndex):
-                external_stocks_prices = external_stocks_prices["Close"]
-                if isinstance(external_stocks_prices, pd.DataFrame):
-                    external_stocks_prices = external_stocks_prices.iloc[:, 0]
-            elif "Close" in external_stocks_prices.columns:
-                external_stocks_prices = external_stocks_prices["Close"]
-            else:
-                external_stocks_prices = external_stocks_prices.iloc[:, 0] if len(external_stocks_prices.columns) > 0 else None
+            # Prefer the Portfolio yfinance wrapper (retry logic) if available.
+            try:
+                from portfolio import Portfolio  # local import to avoid circulars
+                px = Portfolio.download_prices([DEFAULT_STOCKS_TICKER], period="max", auto_adjust=True, ignore_tz=True, progress=False)
+                if not px.empty and DEFAULT_STOCKS_TICKER in px.columns:
+                    external_stocks_prices = px[DEFAULT_STOCKS_TICKER].dropna()
+                else:
+                    external_stocks_prices = None
+            except Exception:
+                external_stocks_prices = None
         except Exception:
             external_stocks_prices = None
 
@@ -459,39 +614,54 @@ def build_llm_rebalance_report(
         macro_lines.append("Macro snapshot: unavailable (missing `FRED_API_KEY` or data fetch failed).")
     else:
         macro_lines.append(f"As-of: {macro_snapshot.asof.date().isoformat()}")
-        if macro_snapshot.global_earnings_yield_est_pct is not None:
-            macro_lines.append(f"Global earnings yield (est., ACWI 1/PE): {macro_snapshot.global_earnings_yield_est_pct:.2f}%")
-        if macro_snapshot.usd_10y_tips_yield_pct is not None:
-            macro_lines.append(f"US 10Y TIPS yield: {macro_snapshot.usd_10y_tips_yield_pct:.2f}%")
+        macro_lines.append("")
+        macro_lines.append("EU / DE (levels):")
         if macro_snapshot.ecb_dfr_pct is not None:
-            macro_lines.append(f"ECB deposit facility rate: {macro_snapshot.ecb_dfr_pct:.2f}%")
+            macro_lines.append(f"  ECB deposit rate: {macro_snapshot.ecb_dfr_pct:.2f}%")
         if macro_snapshot.de_10y_yield_pct is not None:
-            macro_lines.append(f"DE 10Y yield: {macro_snapshot.de_10y_yield_pct:.2f}%")
+            macro_lines.append(f"  DE 10Y yield: {macro_snapshot.de_10y_yield_pct:.2f}%")
         if macro_snapshot.de_cpi_yoy_pct is not None:
-            macro_lines.append(f"DE CPI YoY: {macro_snapshot.de_cpi_yoy_pct:.2f}%")
-        if macro_snapshot.de_10y_real_yield_proxy_pct is not None:
-            macro_lines.append(f"DE 10Y real yield proxy (nominal - CPI YoY): {macro_snapshot.de_10y_real_yield_proxy_pct:.2f}%")
-        if macro_snapshot.eurusd_spot is not None:
-            macro_lines.append(f"EUR/USD spot: {macro_snapshot.eurusd_spot:.4f}")
+            macro_lines.append(f"  DE inflation YoY: {macro_snapshot.de_cpi_yoy_pct:.2f}%")
+        if macro_snapshot.usd_eur_spot is not None:
+            macro_lines.append(f"  USD/EUR spot: {macro_snapshot.usd_eur_spot:.4f}")
+
+        macro_lines.append("")
+        macro_lines.append("US (levels):")
+        if macro_snapshot.fed_rf_pct is not None:
+            macro_lines.append(f"  Fed risk-free rate (EFFR): {macro_snapshot.fed_rf_pct:.2f}%")
+        if macro_snapshot.us_10y_yield_pct is not None:
+            macro_lines.append(f"  US 10Y yield: {macro_snapshot.us_10y_yield_pct:.2f}%")
+        if macro_snapshot.us_cpi_yoy_pct is not None:
+            macro_lines.append(f"  US inflation YoY: {macro_snapshot.us_cpi_yoy_pct:.2f}%")
+        if macro_snapshot.global_earnings_yield_est_pct is not None:
+            macro_lines.append(f"  Global earnings yield (est.): {macro_snapshot.global_earnings_yield_est_pct:.2f}%")
 
         # Add historical trends if available
         if macro_trends:
             macro_lines.append("")  # blank line
             macro_lines.append("Historical trends (3m / 6m / 12m ago):")
-            if "eurusd" in macro_trends:
-                eurusd = macro_trends["eurusd"]
-                vals = []
-                for period in ["3m", "6m", "12m"]:
-                    v = eurusd.get(period)
-                    vals.append(f"{v:.4f}" if v is not None else "N/A")
-                macro_lines.append(f"  EUR/USD: {vals[0]} / {vals[1]} / {vals[2]}")
-            if "ecb_rate" in macro_trends:
-                ecb = macro_trends["ecb_rate"]
-                vals = []
-                for period in ["3m", "6m", "12m"]:
-                    v = ecb.get(period)
-                    vals.append(f"{v:.2f}%" if v is not None else "N/A")
-                macro_lines.append(f"  ECB rate: {vals[0]} / {vals[1]} / {vals[2]}")
+
+            def _fmt_trend(key: str, *, label: str, fmt: str) -> None:
+                d = macro_trends.get(key)
+                if not isinstance(d, dict):
+                    return
+                vals: list[str] = []
+                for p in ["3m", "6m", "12m"]:
+                    v = d.get(p)
+                    if v is None:
+                        vals.append("N/A")
+                    else:
+                        vals.append(fmt.format(v))
+                macro_lines.append(f"  {label}: {vals[0]} / {vals[1]} / {vals[2]}")
+
+            _fmt_trend("ecb_deposit_rate_pct", label="ECB deposit rate", fmt="{:.2f}%")
+            _fmt_trend("de_10y_yield_pct", label="DE 10Y yield", fmt="{:.2f}%")
+            _fmt_trend("de_inflation_yoy_pct", label="DE inflation YoY", fmt="{:.2f}%")
+            _fmt_trend("usd_eur", label="USD/EUR", fmt="{:.4f}")
+            _fmt_trend("fed_risk_free_pct", label="Fed risk-free (EFFR)", fmt="{:.2f}%")
+            _fmt_trend("us_10y_yield_pct", label="US 10Y yield", fmt="{:.2f}%")
+            _fmt_trend("us_inflation_yoy_pct", label="US inflation YoY", fmt="{:.2f}%")
+            _fmt_trend("global_earnings_yield_est_pct", label="Global earnings yield (est.)", fmt="{:.2f}%")
 
     diagnostics_explain = (
         "Diagnostics table notes:\n"

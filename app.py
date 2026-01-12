@@ -14,6 +14,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import streamlit as st
+import random
 
 
 class StepTimer:
@@ -68,7 +69,12 @@ if CACHE_DIR not in sys.path:
 
 from portfolio import Portfolio  # noqa: E402
 from comparison import run_comparison  # noqa: E402
-from rebalancing import compute_rebalancing_diagnostics, get_macro_snapshot, build_llm_rebalance_report  # noqa: E402
+from rebalancing import (  # noqa: E402
+    compute_rebalancing_diagnostics,
+    get_macro_snapshot,
+    build_llm_rebalance_report,
+    get_global_earnings_yield_series,
+)
 from whatif import (  # noqa: E402
     _apply_swap_from_stocks,
     _parse_tickers,
@@ -220,11 +226,9 @@ button[data-testid="baseButton-secondary"] {
     --gdg-bg-header-hovered: #e8e7dd !important;
 }
 
-/* Center the title area */
-[data-testid="stVerticalBlock"] > div:has(> [data-testid="stHeading"]),
-[data-testid="stVerticalBlock"] > div:has(> h1) {
-    text-align: center;
-}
+/* NOTE: Do NOT globally center headings.
+   We only center the custom app title in `_render_title()` via inline HTML styles.
+   Leaving headings left-aligned fixes inconsistent section-header alignment. */
 
 /* Reduce space between title (h1) and subtitle (h2) */
 [data-testid="stHeading"] h1,
@@ -288,17 +292,42 @@ def _rf_annual_controls(*, key_prefix: str, default_series: str = "ECBDFR") -> f
         st.error("Set `FRED_API_KEY` in `.streamlit/secrets.toml` to use FRED data.")
         return 0.0
 
+    @st.cache_data(ttl=3600, show_spinner=False)
+    def _cached_latest_fred_pct(_series_id: str, _api_key: str) -> float | None:
+        # FRED can intermittently fail on cold starts; retry with backoff + jitter.
+        fred = Fred(api_key=_api_key)
+        last_exc: Exception | None = None
+        for attempt in range(6):
+            try:
+                s = fred.get_series(_series_id)
+                if s is None:
+                    raise RuntimeError("FRED returned None")
+                s = s.dropna()
+                if len(s) == 0:
+                    raise RuntimeError("FRED returned empty series")
+                return float(s.iloc[-1])
+            except Exception as e:
+                last_exc = e
+                if attempt < 5:
+                    delay = 0.7 * (2 ** attempt)
+                    delay *= (1.0 + random.uniform(-0.15, 0.15))
+                    time.sleep(delay)
+        # Don't raise inside Streamlit cache: return None and show a friendly warning outside.
+        _ = last_exc
+        return None
+
     try:
-        fred = Fred(api_key=api_key)
-        s = fred.get_series(series_id).dropna()
-        if s is None or len(s) == 0:
+        latest_pct = _cached_latest_fred_pct(series_id, api_key)
+        if latest_pct is None:
             st.warning("FRED series returned no data; using 0%.")
             return 0.0
-        latest_pct = float(s.iloc[-1])
         st.caption(f"Latest: {latest_pct:.3f}%")
         return float(latest_pct / 100.0)
     except Exception as e:
-        st.warning(f"FRED fetch failed; using 0%. ({e})")
+        # Avoid confusing "(None)" messages; show details only if meaningful.
+        msg = str(e).strip()
+        details = f" ({msg})" if msg and msg.lower() != "none" else ""
+        st.warning(f"FRED fetch failed; using 0%.{details}")
         return 0.0
 
 
@@ -360,6 +389,8 @@ def _get_asset_options() -> tuple[list[str], dict[str, tuple[str, str, str]], di
         - Dict mapping Short name to display string "Name (Ticker)" for format_func
     """
     assets = _load_available_assets()
+    # Sort by FULL name (not Short) for consistent UX.
+    assets = sorted(assets, key=lambda a: str(a.get("Name", "")).lower())
     options = []
     mapping = {}
     display_map = {}  # Short -> "Name (Ticker)" for format_func
@@ -371,8 +402,6 @@ def _get_asset_options() -> tuple[list[str], dict[str, tuple[str, str, str]], di
             options.append(short)
             mapping[short] = (name, ticker, short)
             display_map[short] = f"{name} ({ticker})"
-    # Sort options alphabetically by short name (case-insensitive)
-    options.sort(key=lambda x: x.lower())
     return options, mapping, display_map
 
 
@@ -382,6 +411,27 @@ def _get_short_name_map() -> dict[str, str]:
     """
     assets = _load_available_assets()
     return {asset.get("Ticker", ""): asset.get("Short", asset.get("Name", "")) for asset in assets if asset.get("Ticker")}
+
+def _presort_multiselect_state(*, key: str, sort_by: dict[str, str] | None = None) -> None:
+    """
+    Pre-sort a multiselect's stored state *before* the widget is instantiated.
+
+    Streamlit raises if you try to modify `st.session_state[key]` *after* the widget with that key
+    has been created in the same run.
+    """
+    if key not in st.session_state:
+        return
+    v = st.session_state.get(key)
+    if not isinstance(v, list):
+        return
+    def _k(x: str) -> str:
+        if sort_by is None:
+            return str(x).lower()
+        return str(sort_by.get(str(x), str(x))).lower()
+
+    sorted_vals = sorted([str(x) for x in v if x is not None], key=_k)
+    if v != sorted_vals:
+        st.session_state[key] = sorted_vals
 
 
 def _render_asset_help_dropdown() -> None:
@@ -588,6 +638,77 @@ def portfolio_builder(
             return None, None
 
     if source == "Upload JSON":
+        # Help users create a valid JSON by showing examples (built-in portfolios + minimal template).
+        with st.expander("📄 Example JSON (click to view)", expanded=False):
+            portfolios_dir = os.path.join(CACHE_DIR, "portfolios")
+            example_paths: list[str] = []
+            try:
+                for fname in sorted(os.listdir(portfolios_dir)):
+                    if fname.lower().endswith(".json"):
+                        example_paths.append(os.path.join(portfolios_dir, fname))
+            except Exception:
+                example_paths = []
+
+            # Minimal template example: prefer explicit Stocks/Bonds if present, else first two by Name.
+            assets_list = _load_available_assets()
+            assets_by_name = sorted(assets_list, key=lambda a: str(a.get("Name", "")).lower())
+
+            def _find_by_name(name: str) -> dict[str, str] | None:
+                for a in assets_list:
+                    if str(a.get("Name", "")).strip().lower() == name.strip().lower():
+                        return a
+                return None
+
+            a_stocks = _find_by_name("Stocks")
+            a_bonds = _find_by_name("Bonds")
+            if a_stocks and a_bonds:
+                a1, a2 = a_stocks, a_bonds
+            elif len(assets_by_name) >= 2:
+                a1, a2 = assets_by_name[0], assets_by_name[1]
+            else:
+                a1, a2 = {"Name": "Stocks", "Ticker": "ACWE.MI"}, {"Name": "Bonds", "Ticker": "AGGH.MI"}
+
+            minimal_assets = [
+                {"Name": a1.get("Name", "Stocks"), "Ticker": a1.get("Ticker", "ACWE.MI"), "Weight": 60.0, "Target": 60.0},
+                {"Name": a2.get("Name", "Bonds"), "Ticker": a2.get("Ticker", "AGGH.MI"), "Weight": 40.0, "Target": 40.0},
+            ]
+            minimal_example_obj = {"Name": "My Portfolio", "Assets": minimal_assets, "Value": 80_000.0}
+
+            example_options = ["Minimal example (template)"] + [os.path.basename(p) for p in example_paths]
+            selected_ex = st.selectbox("Choose an example", options=example_options, key=f"{key}_upload_example")
+
+            if selected_ex == "Minimal example (template)":
+                txt = json.dumps(minimal_example_obj, indent=2)
+                st.code(txt, language="json")
+                st.download_button(
+                    "Download minimal example (.json)",
+                    data=txt.encode("utf-8"),
+                    file_name="portfolio_example_minimal.json",
+                    mime="application/json",
+                    key=f"{key}_download_example_min",
+                )
+            else:
+                # Load built-in example file
+                match_path = None
+                for pth in example_paths:
+                    if os.path.basename(pth) == selected_ex:
+                        match_path = pth
+                        break
+                if match_path:
+                    try:
+                        with open(match_path, "r", encoding="utf-8") as f:
+                            txt = f.read()
+                        st.code(txt, language="json")
+                        st.download_button(
+                            "Download this example (.json)",
+                            data=txt.encode("utf-8"),
+                            file_name=os.path.basename(match_path),
+                            mime="application/json",
+                            key=f"{key}_download_example_builtin",
+                        )
+                    except Exception as e:
+                        st.warning(f"Could not read example file: {e}")
+
         up = st.file_uploader("Upload a portfolio JSON", type=["json"], key=f"{key}_upload")
         if up is None:
             return None, None
@@ -742,6 +863,11 @@ def portfolio_builder(
             st.session_state[weights_key] = {default_stocks: 60.0, default_bonds: 40.0}
         
         # Asset multiselect
+        # Keep selection chips sorted by FULL name.
+        _presort_multiselect_state(
+            key=f"{key}_asset_select",
+            sort_by={short: asset_mapping.get(short, (short, "", short))[0] for short in asset_options},
+        )
         current_selection = list(st.session_state[weights_key].keys())
         # Ensure current selection only contains valid options
         current_selection = [a for a in current_selection if a in asset_options]
@@ -933,6 +1059,10 @@ def _manual_portfolio_builder(
     if not current_selection:
         current_selection = [default_stocks, default_bonds]
     
+    _presort_multiselect_state(
+        key=f"{key}_asset_select",
+        sort_by={short: asset_mapping.get(short, (short, "", short))[0] for short in asset_options},
+    )
     selected_assets = st.multiselect(
         "Select assets",
         options=asset_options,
@@ -1498,7 +1628,11 @@ def _render_title() -> None:
         """,
         unsafe_allow_html=True,
     )
-    st.subheader("Your financial assistant.")
+    # Center ONLY this subtitle (other section headers should remain left-aligned).
+    st.markdown(
+        '<div style="text-align: center;"><h3 style="margin-top: 0;">Your financial assistant.</h3></div>',
+        unsafe_allow_html=True,
+    )
 
 
 def _go(page: str) -> None:
@@ -1522,7 +1656,11 @@ if page != "home":
 
 
 if page == "home":
-    st.subheader("Hi, what do you need today?")
+    # Center ONLY this home question (other section headers should remain left-aligned).
+    st.markdown(
+        '<div style="text-align: center;"><h3 style="margin-top: 0;">Hi, what do you need today?</h3></div>',
+        unsafe_allow_html=True,
+    )
     # st.markdown("")
     st.markdown("")  # Add spacing between question and buttons
     # Reserve space on both sides so the navigation buttons stay centered under the title.
@@ -1547,7 +1685,7 @@ if page == "home":
 
 **Compare portfolios** — Put multiple portfolios side-by-side to see which performed better historically. Useful for evaluating different allocation strategies (e.g., 60/40 vs 80/20) or comparing your portfolio against benchmarks.
 
-**Rebalance with new cash** — Calculate how to allocate new money to bring your portfolio back to target weights without selling. Includes macro-economic context and optional AI-assisted recommendations.
+**Rebalance with new cash** — Calculate how to allocate new money to bring your portfolio back to target weights without selling. Includes a macro dashboard (EU/DE + US snapshot + 12-month trend charts) and optional AI-assisted recommendations.
 
 **What-if: add an asset** — Explore what would happen if you added a new asset to your portfolio. Analyze diversification benefits, risk-adjusted returns, and backtest the modified portfolio against your baseline.
         """)
@@ -2245,7 +2383,7 @@ This section helps you allocate new cash to your portfolio to move closer to you
 **What you'll get:**
 - **Rebalancing actions**: How much to invest in each asset to minimize deviation from targets
 - **Portfolio diagnostics**: Recent performance metrics, volatility, and correlations for each asset
-- **Macro overview**: Current interest rates, inflation, and yield data for context
+- **Macro dashboard**: A 2×4 snapshot grid (EU/DE + US) and four 12-month trend charts (EU/DE, US, USD/EUR, earnings yield) for context
 - **AI assistance**: Generate a prompt for an LLM to get personalized rebalancing advice
 
 **How to use:** Enter your current portfolio with both current weights (what you have now) and target weights (what you want). Specify your current portfolio value and the new cash amount, then click "Compute rebalance".
@@ -2304,59 +2442,91 @@ This section helps you allocate new cash to your portfolio to move closer to you
                     snap = get_macro_snapshot(fred_api_key=fred_api_key, debug=False)
                     
                     # Fetch macro chart data
-                    macro_chart_data = []
+                    macro_charts: dict[str, list[dict[str, object]]] = {"eu_de": [], "us": [], "fx": [], "earnings": []}
+                    macro_trends: dict[str, dict[str, float | None]] = {}
                     if snap is not None and Fred is not None:
                         try:
                             fred = Fred(api_key=fred_api_key)
-                            one_year_ago = pd.Timestamp.now() - pd.DateOffset(years=1)
-                            macro_series = {
-                                "ECB Deposit Rate (%)": "ECBDFR",
-                                "US 10Y TIPS Yield (%)": "DFII10",
-                                "DE 10Y Yield (%)": "IRLTLT01DEM156N",
-                            }
-                            for label, series_id in macro_series.items():
-                                try:
-                                    s = fred.get_series(series_id, observation_start=one_year_ago)
-                                    if s is not None and len(s) > 0:
-                                        s = s.dropna()
-                                        for date, value in s.items():
-                                            macro_chart_data.append({"Date": date, "Indicator": label, "Value": float(value)})
-                                except Exception:
-                                    pass
+                            now = pd.Timestamp.now()
+                            # Need >12m history for YoY inflation computation
+                            obs_start = now - pd.DateOffset(months=26)
+
+                            def _append_series(chart_key: str, *, label: str, series: pd.Series) -> None:
+                                s = pd.to_numeric(series, errors="coerce").dropna().sort_index()
+                                if s.empty:
+                                    return
+                                for dt, v in s.items():
+                                    macro_charts[chart_key].append({"Date": dt, "Indicator": label, "Value": float(v)})
+
+                            def _yoy_from_cpi(cpi: pd.Series) -> pd.Series:
+                                s = pd.to_numeric(cpi, errors="coerce").dropna().sort_index()
+                                yoy = (s.pct_change(12) * 100.0).dropna()
+                                return yoy
+
+                            def _trend_vals(series: pd.Series) -> dict[str, float | None]:
+                                s = pd.to_numeric(series, errors="coerce").dropna().sort_index()
+                                if s.empty:
+                                    return {"3m": None, "6m": None, "12m": None}
+                                offsets = {"3m": pd.DateOffset(months=3), "6m": pd.DateOffset(months=6), "12m": pd.DateOffset(years=1)}
+                                out: dict[str, float | None] = {}
+                                for k, off in offsets.items():
+                                    target = now - off
+                                    idx = s.index.get_indexer([target], method="nearest")[0]
+                                    out[k] = float(s.iloc[idx]) if 0 <= idx < len(s) else None
+                                return out
+
+                            # --- EU/DE ---
+                            s_ecb = fred.get_series("ECBDFR", observation_start=obs_start).dropna()
+                            s_de10y = fred.get_series("IRLTLT01DEM156N", observation_start=obs_start).dropna()
+                            s_de_cpi = fred.get_series("DEUCPIALLMINMEI", observation_start=obs_start).dropna()
+                            s_de_infl = _yoy_from_cpi(s_de_cpi)
+                            # keep last 12m for charts
+                            one_year_ago = now - pd.DateOffset(years=1)
+                            _append_series("eu_de", label="ECB Overnight (%)", series=s_ecb.loc[s_ecb.index >= one_year_ago])
+                            _append_series("eu_de", label="DE 10Y Yield (%)", series=s_de10y.loc[s_de10y.index >= one_year_ago])
+                            _append_series("eu_de", label="DE Inflation YoY (%)", series=s_de_infl.loc[s_de_infl.index >= one_year_ago])
+
+                            macro_trends["ecb_deposit_rate_pct"] = _trend_vals(s_ecb)
+                            macro_trends["de_10y_yield_pct"] = _trend_vals(s_de10y)
+                            macro_trends["de_inflation_yoy_pct"] = _trend_vals(s_de_infl)
+
+                            # --- US ---
+                            s_fed = fred.get_series("EFFR", observation_start=obs_start).dropna()
+                            s_us10y = fred.get_series("DGS10", observation_start=obs_start).dropna()
+                            s_us_cpi = fred.get_series("CPIAUCSL", observation_start=obs_start).dropna()
+                            s_us_infl = _yoy_from_cpi(s_us_cpi)
+                            _append_series("us", label="FED Overnight (%)", series=s_fed.loc[s_fed.index >= one_year_ago])
+                            _append_series("us", label="US 10Y Yield (%)", series=s_us10y.loc[s_us10y.index >= one_year_ago])
+                            _append_series("us", label="US Inflation YoY (%)", series=s_us_infl.loc[s_us_infl.index >= one_year_ago])
+
+                            macro_trends["fed_risk_free_pct"] = _trend_vals(s_fed)
+                            macro_trends["us_10y_yield_pct"] = _trend_vals(s_us10y)
+                            macro_trends["us_inflation_yoy_pct"] = _trend_vals(s_us_infl)
+
+                            # --- FX (USD/EUR spot) ---
+                            s_usd_eur = fred.get_series("DEXUSEU", observation_start=obs_start).dropna()
+                            _append_series("fx", label="USD/EUR", series=s_usd_eur.loc[s_usd_eur.index >= one_year_ago])
+                            macro_trends["usd_eur"] = _trend_vals(s_usd_eur)
+
+                            # --- Earnings yield (est.) ---
+                            try:
+                                ecy = get_global_earnings_yield_series(debug=False, lookback_days=500)
+                                if ecy is not None and not ecy.empty:
+                                    ecy_12m = ecy.loc[ecy.index >= one_year_ago]
+                                    _append_series("earnings", label="Global EY Est. (%)", series=ecy_12m)
+                                    macro_trends["global_earnings_yield_est_pct"] = _trend_vals(ecy)
+                            except Exception:
+                                pass
                         except Exception:
-                            pass
+                            # best-effort only
+                            macro_charts = {"eu_de": [], "us": [], "fx": [], "earnings": []}
+                            macro_trends = {}
 
                     # Generate LLM prompt
                     llm_prompt = None
                     current_value = getattr(p, "current_value_eur", None)
                     if current_value is not None and snap is not None:
                         try:
-                            macro_trends: dict[str, dict[str, float | None]] = {}
-                            if Fred is not None:
-                                try:
-                                    fred = Fred(api_key=fred_api_key)
-                                    trend_series = {"eurusd": "DEXUSEU", "ecb_rate": "ECBDFR"}
-                                    now = pd.Timestamp.now()
-                                    offsets = {"3m": pd.DateOffset(months=3), "6m": pd.DateOffset(months=6), "12m": pd.DateOffset(years=1)}
-                                    for key, series_id in trend_series.items():
-                                        try:
-                                            s = fred.get_series(series_id, observation_start=now - pd.DateOffset(years=1, months=1))
-                                            if s is not None and len(s) > 0:
-                                                s = s.dropna().sort_index()
-                                                trend_vals: dict[str, float | None] = {}
-                                                for period, offset in offsets.items():
-                                                    target_date = now - offset
-                                                    closest_idx = s.index.get_indexer([target_date], method="nearest")[0]
-                                                    if closest_idx >= 0 and closest_idx < len(s):
-                                                        trend_vals[period] = float(s.iloc[closest_idx])
-                                                    else:
-                                                        trend_vals[period] = None
-                                                macro_trends[key] = trend_vals
-                                        except Exception:
-                                            pass
-                                except Exception:
-                                    pass
-
                             llm_prompt = build_llm_rebalance_report(
                                 portfolio=p,
                                 rebalance_table=table,
@@ -2377,7 +2547,7 @@ This section helps you allocate new cash to your portfolio to move closer to you
                         "diag_transposed": diag_transposed,
                         "diag_error": diag_error,
                         "snap": snap,
-                        "macro_chart_data": macro_chart_data,
+                        "macro_charts": macro_charts,
                         "llm_prompt": llm_prompt,
                         "portfolio_name": getattr(p, "name", "Portfolio"),
                     }
@@ -2503,69 +2673,143 @@ These diagnostics help you understand recent portfolio behavior over the last ~1
                 def _fmt_pct(val: float | None) -> str:
                     return f"{val:.2f}%" if val is not None else "—"
                 
+                def _fmt_fx(val: float | None) -> str:
+                    return f"{val:.4f}" if val is not None else "—"
+                
                 # Check if any values are missing
                 missing_data = any([
                     snap.ecb_dfr_pct is None,
-                    snap.de_cpi_yoy_pct is None,
-                    snap.usd_10y_tips_yield_pct is None,
                     snap.de_10y_yield_pct is None,
-                    snap.de_10y_real_yield_proxy_pct is None,
-                    snap.global_earnings_yield_est_pct is None,
+                    snap.de_cpi_yoy_pct is None,
+                    snap.usd_eur_spot is None,
+                    snap.fed_rf_pct is None,
+                    snap.us_10y_yield_pct is None,
+                    snap.us_cpi_yoy_pct is None,
                 ])
                 if missing_data:
                     st.warning("⚠️ Some FRED data failed to load. Try re-running the analysis.")
 
-                m1, m2, m3 = st.columns(3)
-                with m1:
-                    st.metric("ECB Deposit Rate", _fmt_pct(snap.ecb_dfr_pct))
-                    st.metric("DE CPI YoY", _fmt_pct(snap.de_cpi_yoy_pct))
-                with m2:
-                    st.metric("US 10Y TIPS Yield", _fmt_pct(snap.usd_10y_tips_yield_pct))
-                    st.metric("DE 10Y Yield", _fmt_pct(snap.de_10y_yield_pct))
-                with m3:
-                    st.metric("DE 10Y Real Yield (proxy)", _fmt_pct(snap.de_10y_real_yield_proxy_pct))
-                    st.metric("Global Earnings Yield Est.", _fmt_pct(snap.global_earnings_yield_est_pct))
+                # Layout as requested: 2 rows, 4 metrics each
+                r1 = st.columns(4)
+                r1[0].metric("ECB Overnight", _fmt_pct(snap.ecb_dfr_pct))
+                r1[1].metric("DE 10Y Yield", _fmt_pct(snap.de_10y_yield_pct))
+                r1[2].metric("DE Inflation YoY", _fmt_pct(snap.de_cpi_yoy_pct))
+                r1[3].metric("USD/EUR spot", _fmt_fx(snap.usd_eur_spot))
+
+                r2 = st.columns(4)
+                r2[0].metric("FED Overnight", _fmt_pct(snap.fed_rf_pct))
+                r2[1].metric("US 10Y Yield", _fmt_pct(snap.us_10y_yield_pct))
+                r2[2].metric("US Inflation YoY", _fmt_pct(snap.us_cpi_yoy_pct))
+                r2[3].metric("Global EY (est.)", _fmt_pct(snap.global_earnings_yield_est_pct))
                 
                 with st.expander("ℹ️ What do these indicators mean?", expanded=False):
                     st.markdown("""
-These macro indicators provide context for investment decisions.
+These indicators provide macro context (rates, inflation, FX, valuations) for rebalancing decisions.
 
-**ECB Deposit Rate** — The rate banks earn on overnight deposits at the European Central Bank. Influences borrowing costs and bond yields across Europe. Higher rates typically mean lower bond prices and potentially slower economic growth.
+**ECB Overnight** — Euro area policy rate; anchors short-term EUR rates and influences bond yields.
 
-**DE CPI YoY** — German Consumer Price Index year-over-year, a proxy for Eurozone inflation. High inflation erodes purchasing power and may prompt ECB rate hikes. The target is around 2%.
+**DE 10Y Yield** — Long-term EUR “risk-free” proxy (Bund yield). Higher yields raise the opportunity cost of holding equities.
 
-**US 10Y TIPS Yield** — Yield on US inflation-protected Treasury bonds, representing the "real" (after-inflation) return from safe US assets. Higher real yields make stocks relatively less attractive.
+**DE Inflation YoY** — Proxy for Euro-area inflation pressure. Higher inflation can keep policy rates elevated.
 
-**DE 10Y Yield** — Yield on German 10-year government bonds (Bunds), the benchmark "risk-free" rate for European investors. Higher yields mean higher opportunity cost for holding stocks.
+**USD/EUR spot** — FX rate (USD per 1 EUR). Relevant if you hold USD assets unhedged.
 
-**DE 10Y Real Yield (proxy)** — German 10Y yield minus German CPI, estimating the real return on safe European bonds. Negative values mean bonds are losing purchasing power after inflation.
+**FED Overnight** — US overnight policy rate proxy; influences USD cash yields and discount rates.
 
-**Global Earnings Yield Est.** — Estimated earnings yield (E/P ratio) for global equities, i.e., the "return" stocks offer from earnings. Compare to bond yields: higher earnings yield suggests stocks are relatively more attractive.
+**US 10Y Yield** — Key long-term USD rate. Higher yields can pressure equity valuations.
+
+**US Inflation YoY** — US CPI year-over-year.
+
+**Global Earnings Yield (est.)** — A simple valuation proxy for global equities (higher can imply “cheaper” equities vs bonds).
                     """)
 
 
-                if results["macro_chart_data"]:
-                    st.markdown("#### Last 12 months trend")
-                    macro_df = pd.DataFrame(results["macro_chart_data"])
-                    if not macro_df.empty:
-                        x_axis_format = alt.X("Date:T", title="Date", axis=alt.Axis(format="%m/%Y"))
-                        macro_chart = (
-                            alt.Chart(macro_df)
+                charts = results.get("macro_charts") or {}
+                if isinstance(charts, dict):
+                    x_axis_format = alt.X("Date:T", title="Date", axis=alt.Axis(format="%m/%Y"))
+
+                    def _render_macro_chart(
+                        title: str,
+                        data: list[dict[str, object]],
+                        *,
+                        y_title: str,
+                        indicator_order: list[str] | None = None,
+                        explainer_md: str | None = None,
+                    ) -> None:
+                        dfc = pd.DataFrame(data)
+                        if dfc.empty:
+                            st.info(f"{title}: unavailable.")
+                            return
+                        color = alt.Color("Indicator:N", title=None)
+                        if indicator_order:
+                            color = alt.Color("Indicator:N", title=None, sort=indicator_order)
+                        chart = (
+                            alt.Chart(dfc)
                             .mark_line(strokeWidth=2.0)
                             .encode(
                                 x=x_axis_format,
-                                y=alt.Y("Value:Q", title="Rate (%)"),
-                                color=alt.Color("Indicator:N", title="Indicator"),
+                                y=alt.Y("Value:Q", title=y_title),
+                                color=color,
                                 tooltip=[
                                     alt.Tooltip("Date:T", title="Date"),
                                     alt.Tooltip("Indicator:N", title="Indicator"),
-                                    alt.Tooltip("Value:Q", title="Value", format=".2f"),
+                                    alt.Tooltip("Value:Q", title="Value", format=".3f"),
                                 ],
                             )
-                            .properties(height=300)
+                            .properties(height=260)
                             .interactive()
                         )
-                        st.altair_chart(macro_chart, width="stretch")
+                        st.markdown(f"##### {title}")
+                        st.altair_chart(chart, width="stretch")
+                        if explainer_md:
+                            with st.expander("ℹ️ What does this chart show?", expanded=False):
+                                st.markdown(explainer_md)
+
+                    st.markdown("#### Last 12 months trend")
+                    _render_macro_chart(
+                        "EU / DE indicators",
+                        charts.get("eu_de", []),
+                        y_title="Percent (%)",
+                        indicator_order=["ECB Overnight (%)", "DE 10Y Yield (%)", "DE Inflation YoY (%)"],
+                        explainer_md=(
+                            "- **ECB Overnight (%)**: euro area policy rate proxy (deposit facility rate).\n"
+                            "- **DE 10Y Yield (%)**: long-term EUR rate proxy (Bund yield).\n"
+                            "- **DE Inflation YoY (%)**: Germany CPI year-over-year.\n\n"
+                            "Use this to see whether EUR policy/long rates and inflation have been trending up or down."
+                        ),
+                    )
+                    _render_macro_chart(
+                        "US indicators",
+                        charts.get("us", []),
+                        y_title="Percent (%)",
+                        indicator_order=["FED Overnight (%)", "US 10Y Yield (%)", "US Inflation YoY (%)"],
+                        explainer_md=(
+                            "- **FED Overnight (%)**: US policy rate proxy (EFFR).\n"
+                            "- **US 10Y Yield (%)**: long-term USD rate.\n"
+                            "- **US Inflation YoY (%)**: US CPI year-over-year.\n\n"
+                            "Use this to gauge the direction of US rates and inflation, which can affect global risk assets."
+                        ),
+                    )
+                    _render_macro_chart(
+                        "USD/EUR",
+                        charts.get("fx", []),
+                        y_title="USD per 1 EUR",
+                        indicator_order=["USD/EUR"],
+                        explainer_md=(
+                            "**USD/EUR** is the amount of USD per 1 EUR. If you hold USD-denominated assets (unhedged), FX moves can materially impact EUR returns."
+                        ),
+                    )
+                    _render_macro_chart(
+                        "Global earnings yield (est.)",
+                        charts.get("earnings", []),
+                        y_title="Percent (%)",
+                        indicator_order=["Global EY Est. (%)"],
+                        explainer_md=(
+                            "**Global EY (est.)** is a simple valuation proxy for global equities. "
+                            "Higher values generally imply *cheaper* equities vs their own history (all else equal). "
+                            "This is a best-effort estimate derived from ACWI price history + trailing EPS/PE snapshot."
+                        ),
+                    )
             else:
                 st.warning("Could not fetch macro data. Check your FRED API key and try re-running the analysis.")
 
@@ -2636,12 +2880,19 @@ This section explores what would happen if you added a new asset to your portfol
             st.info("All predefined candidate assets are already in the portfolio.")
         else:
             # Build options using Short names as values, with display mapping
+            candidate_short_to_name: dict[str, str] = {}  # Short name -> full Name
             for asset in filtered_candidates:
                 short = asset.get("Short", asset["Name"])
                 candidate_short_to_ticker[short] = asset["Ticker"]
                 candidate_short_to_display[short] = f"{asset['Name']} ({asset['Ticker']})"
-            # Sort options alphabetically by Short name (case-insensitive)
-            sorted_candidate_shorts = sorted(candidate_short_to_ticker.keys(), key=lambda x: x.lower())
+                candidate_short_to_name[short] = asset["Name"]
+            # Sort options by FULL Name (case-insensitive)
+            sorted_candidate_shorts = sorted(candidate_short_to_ticker.keys(), key=lambda s: str(candidate_short_to_name.get(s, s)).lower())
+            # Keep selection chips sorted by FULL name (not short).
+            _presort_multiselect_state(
+                key="whatif_candidates",
+                sort_by={short: str(candidate_short_to_name.get(short, short)) for short in sorted_candidate_shorts},
+            )
             selected_candidate_shorts = st.multiselect(
                 "Candidate assets to evaluate",
                 options=sorted_candidate_shorts,
