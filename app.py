@@ -369,6 +369,97 @@ def _safe_temp_json(content: bytes) -> str:
     return f.name
 
 
+def _render_example_json_ui(*, key_prefix: str) -> None:
+    """
+    Show example portfolio JSONs (built-ins + a minimal template) to help users author their own files.
+    """
+    with st.expander("📄 Example JSON (click to view)", expanded=False):
+        portfolios_dir = os.path.join(CACHE_DIR, "portfolios")
+        example_paths: list[str] = []
+        try:
+            for fname in sorted(os.listdir(portfolios_dir)):
+                if fname.lower().endswith(".json"):
+                    example_paths.append(os.path.join(portfolios_dir, fname))
+        except Exception:
+            example_paths = []
+
+        # Minimal template example: prefer explicit Stocks/Bonds if present, else first two by Name.
+        assets_list = _load_available_assets()
+        assets_by_name = sorted(assets_list, key=lambda a: str(a.get("Name", "")).lower())
+
+        def _find_by_name(name: str) -> dict[str, str] | None:
+            for a in assets_list:
+                if str(a.get("Name", "")).strip().lower() == name.strip().lower():
+                    return a
+            return None
+
+        a_stocks = _find_by_name("Stocks")
+        a_bonds = _find_by_name("Bonds")
+        if a_stocks and a_bonds:
+            a1, a2 = a_stocks, a_bonds
+        elif len(assets_by_name) >= 2:
+            a1, a2 = assets_by_name[0], assets_by_name[1]
+        else:
+            a1, a2 = {"Name": "Stocks", "Ticker": "ACWE.MI"}, {"Name": "Bonds", "Ticker": "AGGH.MI"}
+
+        # Include `Short` for guidance (parser ignores extra keys, but it's useful to users).
+        minimal_assets = [
+            {
+                "Name": a1.get("Name", "Stocks"),
+                "Ticker": a1.get("Ticker", "ACWE.MI"),
+                "Short": a1.get("Short", a1.get("Name", "Stocks")),
+                "Weight": 60.0,
+                "Target": 60.0,
+            },
+            {
+                "Name": a2.get("Name", "Bonds"),
+                "Ticker": a2.get("Ticker", "AGGH.MI"),
+                "Short": a2.get("Short", a2.get("Name", "Bonds")),
+                "Weight": 40.0,
+                "Target": 40.0,
+            },
+        ]
+        minimal_example_obj = {"Name": "My Portfolio", "Assets": minimal_assets, "Value": 80_000.0}
+
+        example_options = ["Minimal example (template)"] + [os.path.basename(p) for p in example_paths]
+        selected_ex = st.selectbox("Choose an example", options=example_options, key=f"{key_prefix}_example_select")
+
+        if selected_ex == "Minimal example (template)":
+            txt = json.dumps(minimal_example_obj, indent=2)
+            st.code(txt, language="json")
+            st.download_button(
+                "Download minimal example (.json)",
+                data=txt.encode("utf-8"),
+                file_name="portfolio_example_minimal.json",
+                mime="application/json",
+                key=f"{key_prefix}_download_example_min",
+            )
+            return
+
+        match_path = None
+        for pth in example_paths:
+            if os.path.basename(pth) == selected_ex:
+                match_path = pth
+                break
+        if not match_path:
+            st.info("No example file selected.")
+            return
+
+        try:
+            with open(match_path, "r", encoding="utf-8") as f:
+                txt = f.read()
+            st.code(txt, language="json")
+            st.download_button(
+                "Download this example (.json)",
+                data=txt.encode("utf-8"),
+                file_name=os.path.basename(match_path),
+                mime="application/json",
+                key=f"{key_prefix}_download_example_builtin",
+            )
+        except Exception as e:
+            st.warning(f"Could not read example file: {e}")
+
+
 def _load_available_assets() -> list[dict[str, str]]:
     """Load available assets from list.json."""
     assets_path = os.path.join(CACHE_DIR, "assets", "list.json")
@@ -378,6 +469,169 @@ def _load_available_assets() -> list[dict[str, str]]:
             return data.get("Assets", [])
     except Exception:
         return []
+
+def _asset_ticker_set() -> set[str]:
+    return {a.get("Ticker", "") for a in _load_available_assets() if a.get("Ticker")}
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _yf_has_data_for_tickers(tickers: tuple[str, ...]) -> dict[str, bool]:
+    """
+    Best-effort: check whether yfinance can return *any* price data for the tickers.
+    Uses a shorter period to avoid heavy downloads during validation.
+    """
+    out = {t: False for t in tickers}
+    if not tickers:
+        return out
+    try:
+        px = _retry_on_rate_limit(Portfolio.download_prices, list(tickers), period="6mo")
+        if px is None or px.empty:
+            return out
+        for t in tickers:
+            if t in px.columns and not px[t].dropna().empty:
+                out[t] = True
+        return out
+    except Exception:
+        return out
+
+
+@st.cache_data(ttl=24 * 3600, show_spinner=False)
+def _cached_price_date_ranges(tickers: tuple[str, ...]) -> dict[str, tuple[str | None, str | None]]:
+    """
+    Best-effort: get first/last available price dates per ticker.
+
+    Notes:
+    - Uses the same backend price downloader as the rest of the app (`Portfolio.download_prices`),
+      so synthetic tickers like DBMF/ZPRVX are supported.
+    - Cached to avoid recomputing on every rerun (and to avoid repeated Yahoo requests).
+    """
+    tickers_list = [str(t).strip() for t in tickers if str(t).strip()]
+    if not tickers_list:
+        return {}
+
+    tickers_list = sorted(set(tickers_list))
+    out: dict[str, tuple[str | None, str | None]] = {t: (None, None) for t in tickers_list}
+
+    try:
+        px = _retry_on_rate_limit(Portfolio.download_prices, list(tickers_list), period="max")
+    except Exception:
+        return out
+
+    if px is None or px.empty:
+        return out
+
+    for t in tickers_list:
+        if t not in px.columns:
+            continue
+        s = pd.to_numeric(px[t], errors="coerce").dropna()
+        if s.empty:
+            continue
+        try:
+            start = str(pd.Timestamp(s.index.min()).date())
+            end = str(pd.Timestamp(s.index.max()).date())
+        except Exception:
+            start, end = None, None
+        out[t] = (start, end)
+    return out
+
+def _validate_portfolio_json_obj(obj: dict[str, Any]) -> tuple[bool, list[str]]:
+    """
+    Validate uploaded portfolio JSON before attempting to construct a Portfolio.
+
+    Checks:
+    - Template/schema shape
+    - Numeric sanity (weights/targets > 0, sums ~ 100, Value > 0 if provided)
+    - Ticker validity: either in `cache/assets/list.json` OR yfinance has data
+    """
+    errors: list[str] = []
+
+    if not isinstance(obj, dict):
+        return False, ["Top-level JSON must be an object."]
+
+    if "Name" not in obj or not str(obj.get("Name", "")).strip():
+        errors.append("Missing/empty top-level `Name`.")
+
+    assets = obj.get("Assets")
+    if not isinstance(assets, list) or not assets:
+        errors.append("`Assets` must be a non-empty list.")
+        return False, errors
+
+    if "Value" in obj:
+        try:
+            v = float(obj.get("Value"))
+            if not np.isfinite(v) or v <= 0:
+                errors.append("Top-level `Value` must be > 0.")
+        except Exception:
+            errors.append("Top-level `Value` must be a number.")
+
+    tickers: list[str] = []
+    weights: list[float] = []
+    targets: list[float] = []
+
+    for i, a in enumerate(assets):
+        if not isinstance(a, dict):
+            errors.append(f"Assets[{i}] must be an object.")
+            continue
+
+        name = str(a.get("Name", "")).strip()
+        ticker = str(a.get("Ticker", "")).strip()
+        if not name:
+            errors.append(f"Assets[{i}].Name is missing/empty.")
+        if not ticker:
+            errors.append(f"Assets[{i}].Ticker is missing/empty.")
+
+        def _num(field: str) -> float | None:
+            try:
+                return float(a.get(field))
+            except Exception:
+                return None
+
+        w = _num("Weight")
+        t = _num("Target")
+
+        if w is None:
+            errors.append(f"Assets[{i}].Weight must be a number.")
+        elif not np.isfinite(w) or w <= 0:
+            errors.append(f"Assets[{i}].Weight must be > 0.")
+        else:
+            weights.append(float(w))
+
+        if t is None:
+            errors.append(f"Assets[{i}].Target must be a number.")
+        elif not np.isfinite(t) or t <= 0:
+            errors.append(f"Assets[{i}].Target must be > 0.")
+        else:
+            targets.append(float(t))
+
+        if ticker:
+            tickers.append(ticker)
+
+    if errors:
+        return False, errors
+
+    if len(set(tickers)) != len(tickers):
+        dupes = sorted({t for t in tickers if tickers.count(t) > 1})
+        errors.append(f"Duplicate tickers not allowed: {dupes}")
+
+    tol = 0.25
+    w_sum = float(sum(weights))
+    t_sum = float(sum(targets))
+    if abs(w_sum - 100.0) > tol:
+        errors.append(f"`Weight` values must sum to 100 (±{tol}). Got {w_sum:.4f}.")
+    if abs(t_sum - 100.0) > tol:
+        errors.append(f"`Target` values must sum to 100 (±{tol}). Got {t_sum:.4f}.")
+
+    known = _asset_ticker_set()
+    unknown = sorted({t for t in tickers if t not in known})
+    if unknown:
+        checks = _yf_has_data_for_tickers(tuple(unknown))
+        missing = [t for t in unknown if not checks.get(t, False)]
+        if missing:
+            errors.append(
+                "Unknown tickers must either be present in `cache/assets/list.json` or have price data on Yahoo Finance. "
+                f"No data found for: {missing}"
+            )
+
+    return (len(errors) == 0), errors
 
 
 def _get_asset_options() -> tuple[list[str], dict[str, tuple[str, str, str]], dict[str, str]]:
@@ -441,6 +695,9 @@ def _render_asset_help_dropdown() -> None:
         return
     
     with st.expander("💡 Need help choosing assets?", expanded=False):
+        # Compute once (cached) instead of per-asset.
+        tickers_all = [str(a.get("Ticker", "")).strip() for a in assets if str(a.get("Ticker", "")).strip()]
+        date_ranges = _cached_price_date_ranges(tuple(sorted(set(tickers_all))))
         for asset in assets:
             name = asset.get("Name", "")
             ticker = asset.get("Ticker", "")
@@ -449,6 +706,15 @@ def _render_asset_help_dropdown() -> None:
             
             if not name or not ticker:
                 continue
+
+            start_date, end_date = date_ranges.get(str(ticker).strip(), (None, None))
+            sd = start_date or "—"
+            ed = end_date or "—"
+            availability_html = (
+                f'<div style="color: #6b7280; font-size: 0.85em; margin-top: 0.15rem;">'
+                f'Data available from <b>{sd}</b> to <b>{ed}</b>.'
+                f"</div>"
+            )
             
             # Handle Link being either a string or a list of strings
             # Use HTML for proper clickable links that open in new tab
@@ -465,19 +731,19 @@ def _render_asset_help_dropdown() -> None:
                         clickable = f'(<a href="{link[i]}" target="_blank" style="color: #0066cc; text-decoration: underline;">{embedded_ticker}</a>)'
                         desc_with_links = desc_with_links.replace(f'({embedded_ticker})', clickable, 1)
                 st.markdown(
-                    f"**{name}** ({ticker}): {desc_with_links}",
+                    f"**{name}** ({ticker}): {desc_with_links}{availability_html}",
                     unsafe_allow_html=True
                 )
             elif link:
                 # Single link - make ticker clickable
                 ticker_link = f'<a href="{link}" target="_blank" style="color: #0066cc; text-decoration: underline;">{ticker}</a>'
                 st.markdown(
-                    f"**{name}** ({ticker_link}): {description}",
+                    f"**{name}** ({ticker_link}): {description}{availability_html}",
                     unsafe_allow_html=True
                 )
             else:
                 # No link available
-                st.markdown(f"**{name}** ({ticker}): {description}")
+                st.markdown(f"**{name}** ({ticker}): {description}{availability_html}", unsafe_allow_html=True)
 
 
 def _render_portfolio_preview(p: Portfolio) -> None:
@@ -638,82 +904,23 @@ def portfolio_builder(
             return None, None
 
     if source == "Upload JSON":
-        # Help users create a valid JSON by showing examples (built-in portfolios + minimal template).
-        with st.expander("📄 Example JSON (click to view)", expanded=False):
-            portfolios_dir = os.path.join(CACHE_DIR, "portfolios")
-            example_paths: list[str] = []
-            try:
-                for fname in sorted(os.listdir(portfolios_dir)):
-                    if fname.lower().endswith(".json"):
-                        example_paths.append(os.path.join(portfolios_dir, fname))
-            except Exception:
-                example_paths = []
-
-            # Minimal template example: prefer explicit Stocks/Bonds if present, else first two by Name.
-            assets_list = _load_available_assets()
-            assets_by_name = sorted(assets_list, key=lambda a: str(a.get("Name", "")).lower())
-
-            def _find_by_name(name: str) -> dict[str, str] | None:
-                for a in assets_list:
-                    if str(a.get("Name", "")).strip().lower() == name.strip().lower():
-                        return a
-                return None
-
-            a_stocks = _find_by_name("Stocks")
-            a_bonds = _find_by_name("Bonds")
-            if a_stocks and a_bonds:
-                a1, a2 = a_stocks, a_bonds
-            elif len(assets_by_name) >= 2:
-                a1, a2 = assets_by_name[0], assets_by_name[1]
-            else:
-                a1, a2 = {"Name": "Stocks", "Ticker": "ACWE.MI"}, {"Name": "Bonds", "Ticker": "AGGH.MI"}
-
-            minimal_assets = [
-                {"Name": a1.get("Name", "Stocks"), "Ticker": a1.get("Ticker", "ACWE.MI"), "Weight": 60.0, "Target": 60.0},
-                {"Name": a2.get("Name", "Bonds"), "Ticker": a2.get("Ticker", "AGGH.MI"), "Weight": 40.0, "Target": 40.0},
-            ]
-            minimal_example_obj = {"Name": "My Portfolio", "Assets": minimal_assets, "Value": 80_000.0}
-
-            example_options = ["Minimal example (template)"] + [os.path.basename(p) for p in example_paths]
-            selected_ex = st.selectbox("Choose an example", options=example_options, key=f"{key}_upload_example")
-
-            if selected_ex == "Minimal example (template)":
-                txt = json.dumps(minimal_example_obj, indent=2)
-                st.code(txt, language="json")
-                st.download_button(
-                    "Download minimal example (.json)",
-                    data=txt.encode("utf-8"),
-                    file_name="portfolio_example_minimal.json",
-                    mime="application/json",
-                    key=f"{key}_download_example_min",
-                )
-            else:
-                # Load built-in example file
-                match_path = None
-                for pth in example_paths:
-                    if os.path.basename(pth) == selected_ex:
-                        match_path = pth
-                        break
-                if match_path:
-                    try:
-                        with open(match_path, "r", encoding="utf-8") as f:
-                            txt = f.read()
-                        st.code(txt, language="json")
-                        st.download_button(
-                            "Download this example (.json)",
-                            data=txt.encode("utf-8"),
-                            file_name=os.path.basename(match_path),
-                            mime="application/json",
-                            key=f"{key}_download_example_builtin",
-                        )
-                    except Exception as e:
-                        st.warning(f"Could not read example file: {e}")
+        _render_example_json_ui(key_prefix=f"{key}_upload")
 
         up = st.file_uploader("Upload a portfolio JSON", type=["json"], key=f"{key}_upload")
         if up is None:
             return None, None
         try:
-            tmp = _safe_temp_json(up.getvalue())
+            raw = up.getvalue()
+            # Validate uploaded JSON BEFORE constructing Portfolio (better error messages + avoids unnecessary downloads).
+            try:
+                obj = json.loads(raw.decode("utf-8"))
+            except Exception:
+                raise ValueError("Invalid JSON file (could not parse).")
+            ok, errs = _validate_portfolio_json_obj(obj)
+            if not ok:
+                raise ValueError("Invalid portfolio JSON:\n- " + "\n- ".join(errs))
+
+            tmp = _safe_temp_json(raw)
             loaded_p = Portfolio.from_json(tmp)
             _render_portfolio_preview(loaded_p)
             return loaded_p, None
@@ -874,13 +1081,22 @@ def portfolio_builder(
         if not current_selection:
             current_selection = [default_stocks, default_bonds]
         
-        selected_assets = st.multiselect(
-            "Select assets",
-            options=asset_options,
-            default=current_selection,
-            format_func=lambda x: asset_display_map.get(x, x),  # Show "Name (Ticker)" in dropdown
-            key=f"{key}_asset_select",
-        )
+        _asset_select_key = f"{key}_asset_select"
+        if _asset_select_key in st.session_state:
+            selected_assets = st.multiselect(
+                "Select assets",
+                options=asset_options,
+                format_func=lambda x: asset_display_map.get(x, x),  # Show "Name (Ticker)" in dropdown
+                key=_asset_select_key,
+            )
+        else:
+            selected_assets = st.multiselect(
+                "Select assets",
+                options=asset_options,
+                default=current_selection,
+                format_func=lambda x: asset_display_map.get(x, x),  # Show "Name (Ticker)" in dropdown
+                key=_asset_select_key,
+            )
         
         if not selected_assets:
             st.warning("Please select at least one asset.")
@@ -1063,13 +1279,22 @@ def _manual_portfolio_builder(
         key=f"{key}_asset_select",
         sort_by={short: asset_mapping.get(short, (short, "", short))[0] for short in asset_options},
     )
-    selected_assets = st.multiselect(
-        "Select assets",
-        options=asset_options,
-        default=current_selection,
-        format_func=lambda x: asset_display_map.get(x, x),  # Show "Name (Ticker)" in dropdown
-        key=f"{key}_asset_select",
-    )
+    _asset_select_key = f"{key}_asset_select"
+    if _asset_select_key in st.session_state:
+        selected_assets = st.multiselect(
+            "Select assets",
+            options=asset_options,
+            format_func=lambda x: asset_display_map.get(x, x),  # Show "Name (Ticker)" in dropdown
+            key=_asset_select_key,
+        )
+    else:
+        selected_assets = st.multiselect(
+            "Select assets",
+            options=asset_options,
+            default=current_selection,
+            format_func=lambda x: asset_display_map.get(x, x),  # Show "Name (Ticker)" in dropdown
+            key=_asset_select_key,
+        )
     
     if not selected_assets:
         st.warning("Please select at least one asset.")
@@ -1252,6 +1477,150 @@ def _rolling_correlation_to_stocks(p: Portfolio, window_days: int = 252) -> pd.D
     if not corr_series:
         return pd.DataFrame()
     return pd.concat(corr_series, axis=1).dropna(how="all")
+
+
+def _drawdown_series(value: pd.Series) -> pd.Series:
+    """
+    Compute drawdown series from a value/equity series:
+      dd(t) = value(t) / peak(t) - 1
+    Returns a series with the same index (NaNs dropped).
+    """
+    if value is None or len(value) == 0:
+        return pd.Series(dtype=float)
+    v = pd.to_numeric(value, errors="coerce").dropna()
+    if v.empty:
+        return pd.Series(dtype=float)
+    peak = v.cummax()
+    dd = (v / peak) - 1.0
+    return dd
+
+
+def _fmt_days(val: float | None) -> str:
+    if val is None or not np.isfinite(float(val)):
+        return "—"
+    d = int(round(float(val)))
+    return f"{d}d"
+
+
+def _render_drawdown_chart_single(
+    value_series: pd.Series,
+    *,
+    title: str = "Drawdown",
+    height: int = 260,
+) -> None:
+    dd = _drawdown_series(value_series)
+    if dd.empty:
+        st.info("Drawdown unavailable.")
+        return
+    dd_pct = dd * 100.0
+    df = dd_pct.to_frame(name="Drawdown (%)").reset_index().rename(columns={"index": "Date"})
+    min_dd = float(dd_pct.min()) if not dd_pct.empty else -1.0
+    # Pad the domain a bit for readability
+    dom_min = min(-1.0, min_dd - 1.0)
+
+    st.markdown(f"#### {title}")
+    chart = (
+        alt.Chart(df)
+        .mark_area(color="#ef4444", opacity=0.28)
+        .encode(
+            x=alt.X("Date:T", title="Date", axis=alt.Axis(format="%m/%Y")),
+            y=alt.Y("Drawdown (%):Q", title="Drawdown (%)", scale=alt.Scale(domain=[dom_min, 0.0])),
+            tooltip=[
+                alt.Tooltip("Date:T", title="Date"),
+                alt.Tooltip("Drawdown (%):Q", title="Drawdown", format=".2f"),
+            ],
+        )
+        .properties(height=height)
+    )
+    line = alt.Chart(df).mark_line(color="#ef4444", strokeWidth=1.8).encode(
+        x="Date:T",
+        y="Drawdown (%):Q",
+    )
+    zero = alt.Chart(pd.DataFrame({"y": [0.0]})).mark_rule(color="#bbbbbb", strokeDash=[4, 4]).encode(y="y:Q")
+    st.altair_chart((chart + line + zero).interactive(), width="stretch")
+
+    with st.expander("ℹ️ What does this chart show?", expanded=False):
+        st.markdown(
+            """
+**Drawdown** measures how far the portfolio is below its prior peak at each point in time.
+
+- **0%** means “at a new all-time high”.
+- **-20%** means the portfolio is 20% below its previous peak.
+
+**Longest drawdown period** is the longest stretch of time spent below the previous peak (i.e., “underwater”), measured in days.
+            """
+        )
+
+
+def _render_drawdown_chart_multi(
+    value_series_by_name: dict[str, pd.Series],
+    *,
+    title: str = "Drawdown",
+    height: int = 320,
+    portfolio_order: list[str] | None = None,
+) -> None:
+    rows: list[dict[str, object]] = []
+    min_dd = 0.0
+    if value_series_by_name is None:
+        value_series_by_name = {}
+    items: list[tuple[str, pd.Series]] = list(value_series_by_name.items())
+    if portfolio_order:
+        ordered: list[tuple[str, pd.Series]] = []
+        seen: set[str] = set()
+        for k in portfolio_order:
+            if k in value_series_by_name:
+                ordered.append((k, value_series_by_name[k]))
+                seen.add(k)
+        for k, v in items:
+            if k not in seen:
+                ordered.append((k, v))
+        items = ordered
+
+    for name, v in items:
+        dd = _drawdown_series(v)
+        if dd.empty:
+            continue
+        dd_pct = dd * 100.0
+        if not dd_pct.empty:
+            min_dd = float(min(min_dd, float(dd_pct.min())))
+        for dt, val in dd_pct.items():
+            rows.append({"Date": dt, "Portfolio": str(name), "Drawdown (%)": float(val)})
+
+    if not rows:
+        st.info("Drawdown unavailable.")
+        return
+
+    df = pd.DataFrame(rows)
+    dom_min = min(-1.0, float(min_dd) - 1.0)
+
+    st.markdown(f"#### {title}")
+    chart = (
+        alt.Chart(df)
+        .mark_line(strokeWidth=2.0)
+        .encode(
+            x=alt.X("Date:T", title="Date", axis=alt.Axis(format="%m/%Y")),
+            y=alt.Y("Drawdown (%):Q", title="Drawdown (%)", scale=alt.Scale(domain=[dom_min, 0.0])),
+            color=alt.Color("Portfolio:N", title="Portfolio", sort=portfolio_order if portfolio_order else None),
+            tooltip=[
+                alt.Tooltip("Date:T", title="Date"),
+                alt.Tooltip("Portfolio:N", title="Portfolio"),
+                alt.Tooltip("Drawdown (%):Q", title="Drawdown", format=".2f"),
+            ],
+        )
+        .properties(height=height)
+        .interactive()
+    )
+    zero = alt.Chart(pd.DataFrame({"y": [0.0]})).mark_rule(color="#bbbbbb", strokeDash=[4, 4]).encode(y="y:Q")
+    st.altair_chart((chart + zero), width="stretch")
+
+    with st.expander("ℹ️ What does this chart show?", expanded=False):
+        st.markdown(
+            """
+This compares **drawdowns** (peak-to-trough declines) across portfolios.
+
+Lower (more negative) values mean deeper declines from previous highs. Portfolios that recover faster will show shorter “underwater” stretches.
+            """
+        )
 
 
 def _compare_portfolios_streamlit(
@@ -1861,23 +2230,33 @@ This section analyzes a single portfolio's historical performance using backtest
             st.caption(f"Analysis period: {results['start_date']} → {results['end_date']}")
 
             stats = results["stats"]
-            # First row: CAGR, Vol, Max Drawdown
-            m1, m2, m3 = st.columns(3)
-            m1.metric("CAGR", f"{stats['cagr']*100:.2f}%" if np.isfinite(stats["cagr"]) else "—")
-            m2.metric("Vol (ann.)", f"{stats['vol_annual']*100:.2f}%" if np.isfinite(stats["vol_annual"]) else "—")
-            max_dd = stats.get("max_drawdown", float("nan"))
-            max_dd_display = f"{max_dd*100:.2f}%" if np.isfinite(max_dd) else "—"
-            m3.metric("Max Drawdown", max_dd_display)
-            # Second row: Sharpe, Sortino, Ulcer Index
-            m4, m5, m6 = st.columns(3)
-            m4.metric("Sharpe", f"{stats['sharpe']:.2f}" if np.isfinite(stats["sharpe"]) else "—")
-            m5.metric("Sortino", f"{stats['sortino']:.2f}" if np.isfinite(stats["sortino"]) else "—")
-            ulcer = stats.get("ulcer_index", float("nan"))
-            ulcer_display = f"{ulcer:.2f}" if np.isfinite(ulcer) else "—"
-            m6.metric("Ulcer Index", ulcer_display)
+            # 2×4 metrics grid
+            m1, m2, m3, m4 = st.columns(4)
+            total_ret = float(stats.get("total_return", float("nan")))
+            m1.metric("Total Return", f"{total_ret*100:.2f}%" if np.isfinite(total_ret) else "—")
+            m2.metric("CAGR", f"{stats['cagr']*100:.2f}%" if np.isfinite(stats["cagr"]) else "—")
+            m3.metric("Vol (ann.)", f"{stats['vol_annual']*100:.2f}%" if np.isfinite(stats["vol_annual"]) else "—")
+            max_dd = float(stats.get("max_drawdown", float("nan")))
+            m4.metric("Max Drawdown", f"{max_dd*100:.2f}%" if np.isfinite(max_dd) else "—")
+
+            m5, m6, m7, m8 = st.columns(4)
+            m5.metric("Sharpe", f"{stats['sharpe']:.2f}" if np.isfinite(stats["sharpe"]) else "—")
+            m6.metric("Sortino", f"{stats['sortino']:.2f}" if np.isfinite(stats["sortino"]) else "—")
+            ulcer = float(stats.get("ulcer_index", float("nan")))
+            m7.metric("Ulcer Index", f"{ulcer:.2f}" if np.isfinite(ulcer) else "—")
+            ldd = float(stats.get("longest_drawdown_days", float("nan")))
+            # Fallback for older cached results (missing key) or NaN values.
+            if not np.isfinite(ldd):
+                try:
+                    ldd = float(Portfolio.longest_drawdown_days(results["value_series"]))
+                except Exception:
+                    ldd = float("nan")
+            m8.metric("Longest Drawdown", _fmt_days(ldd))
 
             with st.expander("ℹ️ What do these metrics mean?", expanded=False):
                 st.markdown("""
+**Total Return** — Cumulative gain/loss over the entire period. A 50% total return means €10,000 became €15,000.
+
 **CAGR (Compound Annual Growth Rate)** — The average annual return assuming profits are reinvested. A 10% CAGR means the portfolio grew by 10% per year on average.
 
 **Volatility (annualized)** — A measure of how much returns fluctuate. Higher volatility means more uncertainty. Typically, 10-15% is moderate; above 20% is considered high.
@@ -1887,6 +2266,8 @@ This section analyzes a single portfolio's historical performance using backtest
 **Sortino Ratio** — Similar to Sharpe, but only penalizes *downside* volatility (losses), not upside movements. More relevant if you care primarily about avoiding losses rather than overall stability.
 
 **Max Drawdown** — The largest peak-to-trough decline during the period. A -30% max drawdown means at some point the portfolio lost 30% from its previous high before recovering.
+
+**Longest Drawdown** — The longest stretch of time the portfolio stayed below its previous peak (“underwater”), measured in days.
 
 **Ulcer Index** — Measures downside volatility by computing the quadratic mean of percentage drawdowns from peak. Lower is better: below 5 is excellent, 5-10 is good, 10-15 is moderate, above 15 indicates significant drawdown stress.
                 """)
@@ -2037,6 +2418,9 @@ This chart shows how each non-stock asset's returns have moved relative to your 
 **Why "rolling"?** Correlations change over time, especially during market stress. A bond fund that normally has low correlation to stocks may suddenly become more correlated during a crisis. This chart helps you see how stable the diversification benefit has been historically.
                         """)
 
+                # Drawdown chart (requested: after rolling correlation graph)
+                _render_drawdown_chart_single(value_series, title="Drawdown")
+
 
 elif page == "compare":
     with st.expander("ℹ️ About this section", expanded=False):
@@ -2084,11 +2468,25 @@ This section compares multiple portfolios side-by-side using the same time perio
     if uploaded:
         for up in uploaded:
             try:
-                tmp = _safe_temp_json(up.getvalue())
+                raw = up.getvalue()
+                try:
+                    obj = json.loads(raw.decode("utf-8"))
+                except Exception:
+                    st.warning(f"Upload '{up.name}': invalid JSON (could not parse).")
+                    continue
+                ok, errs = _validate_portfolio_json_obj(obj)
+                if not ok:
+                    st.warning(f"Upload '{up.name}' rejected:\n- " + "\n- ".join(errs))
+                    continue
+
+                tmp = _safe_temp_json(raw)
                 p_preview = Portfolio.from_json(tmp)
                 _render_portfolio_preview(p_preview)
             except Exception:
                 pass
+
+    # Help users create valid JSONs by providing examples.
+    _render_example_json_ui(key_prefix="compare")
     
     # Multiple manual portfolios
     # st.markdown("#### Manual portfolios")
@@ -2121,7 +2519,16 @@ This section compares multiple portfolios side-by-side using the same time perio
     if uploaded:
         for up in uploaded:
             try:
-                tmp = _safe_temp_json(up.getvalue())
+                raw = up.getvalue()
+                try:
+                    obj = json.loads(raw.decode("utf-8"))
+                except Exception:
+                    continue
+                ok, errs = _validate_portfolio_json_obj(obj)
+                if not ok:
+                    continue
+
+                tmp = _safe_temp_json(raw)
                 p_temp = Portfolio.from_json(tmp)
                 name = getattr(p_temp, "name", None) or up.name
                 all_portfolios.append((str(name), p_temp))
@@ -2257,6 +2664,7 @@ This section compares multiple portfolios side-by-side using the same time perio
                             "Sharpe": float(stats.get("sharpe", float("nan"))),
                             "Sortino": float(stats.get("sortino", float("nan"))),
                             "Max Drawdown": float(stats.get("max_drawdown", float("nan"))),
+                            "Longest Drawdown": float(stats.get("longest_drawdown_days", float("nan"))),
                             "Ulcer Index": float(stats.get("ulcer_index", float("nan"))),
                         }
                     )
@@ -2294,6 +2702,8 @@ This section compares multiple portfolios side-by-side using the same time perio
                 pct_cols = ["Total Return", "CAGR", "Vol (ann.)", "Max Drawdown"]
                 for c in pct_cols:
                     pretty[c] = (pretty[c].astype(float) * 100.0).round(2).astype(str) + "%"
+                if "Longest Drawdown" in pretty.columns:
+                    pretty["Longest Drawdown"] = pretty["Longest Drawdown"].apply(lambda x: _fmt_days(float(x)) if pd.notna(x) else "—")
                 pretty["Ulcer Index"] = pretty["Ulcer Index"].astype(float).round(2).astype(str)
                 pretty["Sharpe"] = pretty["Sharpe"].astype(float).round(2).astype(str)
                 pretty["Sortino"] = pretty["Sortino"].astype(float).round(2).astype(str)
@@ -2318,6 +2728,23 @@ This section compares multiple portfolios side-by-side using the same time perio
     # Display results from session state (outside the status block)
     if "compare_results" in st.session_state:
         results = st.session_state["compare_results"]
+
+        # Backward-compatible: older cached runs won't have Longest Drawdown in stats_df.
+        # Also, early buggy computations may have filled it with "—" everywhere.
+        stats_df = results.get("stats_df")
+        if isinstance(stats_df, pd.DataFrame):
+            needs_ldd = ("Longest Drawdown" not in stats_df.columns) or (
+                "Longest Drawdown" in stats_df.columns and stats_df["Longest Drawdown"].astype(str).replace("—", "").str.strip().eq("").all()
+            )
+            if needs_ldd:
+                try:
+                    vs = results.get("value_series") or {}
+                    ldd_map = {k: _fmt_days(float(Portfolio.longest_drawdown_days(v))) for k, v in vs.items()}
+                    stats_df = stats_df.copy()
+                    stats_df["Longest Drawdown"] = [ldd_map.get(idx, "—") for idx in stats_df.index]
+                    results["stats_df"] = stats_df
+                except Exception:
+                    pass
         
         st.markdown("### Allocation overview")
         st.dataframe(results["alloc_df"].T, width="stretch")
@@ -2339,6 +2766,8 @@ This section compares multiple portfolios side-by-side using the same time perio
 **Sortino Ratio** — Like Sharpe, but only penalizes downside volatility. More relevant if you're primarily concerned about losses rather than overall stability.
 
 **Max Drawdown** — The worst peak-to-trough decline, showing the maximum pain an investor would have experienced during the period.
+
+**Longest Drawdown** — The longest stretch of time the portfolio stayed below its previous peak (“underwater”), measured in days.
 
 **Ulcer Index** — Measures downside volatility using the quadratic mean of percentage drawdowns. Lower is better: below 5 is excellent, 5-10 is good, 10-15 is moderate, above 15 indicates significant stress.
 
@@ -2373,6 +2802,9 @@ This section compares multiple portfolios side-by-side using the same time perio
             .interactive()
         )
         st.altair_chart(chart, width="stretch")
+
+        # Drawdown comparison chart (requested)
+        _render_drawdown_chart_multi(results["value_series"], title="Drawdown (comparison)")
 
 
 elif page == "rebalance":
@@ -2893,14 +3325,23 @@ This section explores what would happen if you added a new asset to your portfol
                 key="whatif_candidates",
                 sort_by={short: str(candidate_short_to_name.get(short, short)) for short in sorted_candidate_shorts},
             )
-            selected_candidate_shorts = st.multiselect(
-                "Candidate assets to evaluate",
-                options=sorted_candidate_shorts,
-                default=[],
-                format_func=lambda x: candidate_short_to_display.get(x, x),  # Show "Name (Ticker)" in dropdown
-                key="whatif_candidates",
-                help="Select one or more assets to analyze for potential inclusion in your portfolio.",
-            )
+            if "whatif_candidates" in st.session_state:
+                selected_candidate_shorts = st.multiselect(
+                    "Candidate assets to evaluate",
+                    options=sorted_candidate_shorts,
+                    format_func=lambda x: candidate_short_to_display.get(x, x),  # Show "Name (Ticker)" in dropdown
+                    key="whatif_candidates",
+                    help="Select one or more assets to analyze for potential inclusion in your portfolio.",
+                )
+            else:
+                selected_candidate_shorts = st.multiselect(
+                    "Candidate assets to evaluate",
+                    options=sorted_candidate_shorts,
+                    default=[],
+                    format_func=lambda x: candidate_short_to_display.get(x, x),  # Show "Name (Ticker)" in dropdown
+                    key="whatif_candidates",
+                    help="Select one or more assets to analyze for potential inclusion in your portfolio.",
+                )
 
         # Get available assets with their weights for the source selection
         assets_map = getattr(p, "assets", {})
@@ -3211,6 +3652,10 @@ This section explores what would happen if you added a new asset to your portfol
                         backtest_df["Sharpe"] = df["sharpe"].astype(float).round(2).astype(str)
                         backtest_df["Sortino"] = df["sortino"].astype(float).round(2).astype(str)
                         backtest_df["Max Drawdown"] = (df["max_drawdown"].astype(float) * 100.0).round(2).astype(str) + "%"
+                        if "longest_drawdown_days" in df.columns:
+                            backtest_df["Longest Drawdown"] = df["longest_drawdown_days"].apply(
+                                lambda x: _fmt_days(float(x)) if pd.notna(x) else "—"
+                            )
                         backtest_df["Ulcer Index"] = df["ulcer_index"].astype(float).round(2).astype(str)
                         llm_backtest_df = backtest_df
 
@@ -3325,6 +3770,18 @@ This table shows how each candidate asset relates to your existing portfolio.
             # Backtest comparison table (transposed: metrics as rows)
             if results["backtest_df"] is not None:
                 st.markdown("### Backtest comparison")
+                # Backward-compatible: older cached runs may not have Longest Drawdown column.
+                bt_df = results["backtest_df"]
+                if isinstance(bt_df, pd.DataFrame):
+                    try:
+                        if "Longest Drawdown" not in bt_df.columns:
+                            vs = results.get("value_series") or {}
+                            dd_map = {k: _fmt_days(float(Portfolio.longest_drawdown_days(v))) for k, v in vs.items()}
+                            bt_df = bt_df.copy()
+                            bt_df["Longest Drawdown"] = [dd_map.get(idx, "—") for idx in bt_df.index]
+                            results["backtest_df"] = bt_df
+                    except Exception:
+                        pass
                 st.dataframe(results["backtest_df"].T, width="stretch")
                 
                 with st.expander("ℹ️ What do these metrics mean?", expanded=False):
@@ -3342,6 +3799,8 @@ This table compares historical performance between your baseline portfolio and p
 **Sortino** — Similar to Sharpe but only penalizes downside volatility. Higher is better, especially relevant for loss-averse investors.
 
 **Max Drawdown** — The largest peak-to-trough decline during the period. Less negative values indicate smaller worst-case losses.
+
+**Longest Drawdown** — The longest stretch of time the portfolio stayed below its previous peak (“underwater”), measured in days.
 
 **Ulcer Index** — Measures downside volatility using the quadratic mean of percentage drawdowns. Lower is better: below 5 is excellent, 5-10 is good, above 10 indicates stress.
 
@@ -3380,6 +3839,9 @@ This table compares historical performance between your baseline portfolio and p
                         .interactive()
                     )
                     st.altair_chart(chart, width="stretch")
+
+                    # Drawdown comparison chart (requested)
+                    _render_drawdown_chart_multi(value_series, title="Drawdown (comparison)", portfolio_order=portfolio_order)
 
             # AI-Assisted Analysis section (combined prompt + query)
             if results["llm_prompt"]:

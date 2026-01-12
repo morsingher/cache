@@ -38,6 +38,16 @@ def _fmt_num(x: float) -> str:
     return f"{v:.3f}"
 
 
+def _fmt_days(x: float) -> str:
+    try:
+        v = float(x)
+    except Exception:
+        return "nan"
+    if not np.isfinite(v):
+        return "nan"
+    return f"{int(round(v))}d"
+
+
 def run_comparison(args, *, rf_annual: float):
     """
     Compare multiple portfolio JSONs passed via args.compare.
@@ -114,6 +124,7 @@ def run_comparison(args, *, rf_annual: float):
                 "Sharpe": float(stats.get("sharpe", float("nan"))),
                 "Sortino": float(stats.get("sortino", float("nan"))),
                 "Max Drawdown": float(stats.get("max_drawdown", float("nan"))),
+                "Longest Drawdown": float(stats.get("longest_drawdown_days", float("nan"))),
                 "Max Gain": float(stats.get("max_gain", float("nan"))),
             }
         )
@@ -126,6 +137,8 @@ def run_comparison(args, *, rf_annual: float):
         for c in df.columns:
             if c not in formatters:
                 formatters[c] = _fmt_num
+        if "Longest Drawdown" in df.columns:
+            formatters["Longest Drawdown"] = _fmt_days
         print(df.to_string(formatters=formatters))
     print()
 

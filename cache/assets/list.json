@@ -11,7 +11,7 @@
             "Name": "Bonds",
             "Ticker": "AGGH.MI",
             "Short": "Bonds",
-            "Description": "Tracks the Bloomberg Global Aggregate Bond Index, offering exposure to investment-grade bonds from issuers around the world.",
+            "Description": "Tracks the Bloomberg Global Aggregate Bond Index (EUR Hedged), offering exposure to investment-grade bonds from issuers around the world.",
             "Link": "https://www.justetf.com/en/etf-profile.html?isin=IE00BDBRDM35"
         },
         {

@@ -543,6 +543,8 @@ def _print_backtest_table(
     out["CAGR (%)"] = df["cagr"].astype(float) * 100.0
     out["Volatility (%)"] = df["vol_annual"].astype(float) * 100.0
     out["Max Drawdown (%)"] = df["max_drawdown"].astype(float) * 100.0
+    if "longest_drawdown_days" in df.columns:
+        out["Longest Drawdown (days)"] = df["longest_drawdown_days"].astype(float)
     out["Sharpe"] = df["sharpe"].astype(float)
     out["Sortino"] = df["sortino"].astype(float)
 
@@ -553,6 +555,11 @@ def _print_backtest_table(
         to_print[["Total Return (%)", "CAGR (%)", "Volatility (%)", "Max Drawdown (%)"]] = to_print[
             ["Total Return (%)", "CAGR (%)", "Volatility (%)", "Max Drawdown (%)"]
         ].round(2)
+        if "Longest Drawdown (days)" in to_print.columns:
+            # Keep as integer days where possible.
+            to_print["Longest Drawdown (days)"] = to_print["Longest Drawdown (days)"].apply(
+                lambda x: int(round(float(x))) if pd.notna(x) and np.isfinite(float(x)) else np.nan
+            )
         to_print[["Sharpe", "Sortino"]] = to_print[["Sharpe", "Sortino"]].round(2)
         print(to_print.to_string())
     print()

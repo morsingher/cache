@@ -13,6 +13,7 @@ import json
 
 # Configure logging for retry attempts
 logger = logging.getLogger(__name__)
+logging.getLogger("yfinance").setLevel(logging.ERROR)
 
 @dataclass(frozen=True)
 class _CacheEntry:
@@ -123,6 +124,11 @@ def _retry_yf_download(
                 "500" in error_msg,
                 "502" in error_msg,
                 "503" in error_msg,
+                "Too Many Requests" in error_msg,
+                "rate limit" in error_msg.lower(),
+                "rate limited" in error_msg.lower(),
+                "429" in error_msg,
+                "YFRateLimitError" in error_msg,
             ])
             
             if attempt < max_retries - 1 and retryable:
@@ -334,7 +340,7 @@ class Portfolio:
             # Retry missing tickers individually and merge.
             missing = [t for t in tickers_to_download if t not in prices.columns or prices[t].dropna().empty]
             if missing:
-                logger.warning(f"yfinance returned empty series for tickers {missing}; retrying individually...")
+                logger.info(f"yfinance returned empty series for tickers {missing}; retrying individually...")
                 for t in missing:
                     raw_t = _retry_yf_download(
                         [t],
@@ -588,6 +594,59 @@ class Portfolio:
         return ui
 
     @staticmethod
+    def longest_drawdown_days(value: pd.Series) -> float:
+        """
+        Longest drawdown duration (in calendar days) measured as the longest time spent
+        "underwater" (value below its running peak).
+
+        - Drawdown is defined from a value/equity curve: dd(t) = value(t)/peak(t) - 1
+        - A drawdown period starts when dd drops below 0 and ends when dd returns to 0
+          (i.e., value recovers to a new/all-time high) or at the series end if never recovered.
+
+        Returns:
+            float days (e.g., 180.0) or NaN if not computable.
+        """
+        if value is None or value.empty:
+            return float("nan")
+        v = pd.to_numeric(value, errors="coerce").dropna()
+        if v.empty or len(v) < 2:
+            return float("nan")
+
+        peak = v.cummax()
+        dd = (v / peak) - 1.0
+        underwater = dd < 0
+        if not underwater.any():
+            return 0.0
+
+        # Start of a drawdown segment: underwater turns False -> True
+        starts_mask = underwater & (~underwater.shift(1, fill_value=False))
+        # End of a drawdown segment (recovery): underwater turns True -> False (at the recovery timestamp)
+        ends_mask = (~underwater) & (underwater.shift(1, fill_value=False))
+
+        starts = list(v.index[starts_mask])
+        ends = list(v.index[ends_mask])
+
+        # If we end underwater, last segment has no recovery; treat end-of-series as recovery.
+        if len(ends) < len(starts):
+            ends.append(v.index[-1])
+
+        # Defensive: if something odd happens, align lengths.
+        n = min(len(starts), len(ends))
+        starts = starts[:n]
+        ends = ends[:n]
+
+        longest_days = 0.0
+        for s, e in zip(starts, ends):
+            try:
+                days = float((pd.Timestamp(e) - pd.Timestamp(s)).days)
+            except Exception:
+                continue
+            if days > longest_days:
+                longest_days = days
+
+        return float(longest_days)
+
+    @staticmethod
     def backtest_stats(
         value: pd.Series,
         *,
@@ -609,6 +668,7 @@ class Portfolio:
                 "sharpe": float("nan"),
                 "sortino": float("nan"),
                 "max_drawdown": float("nan"),
+                "longest_drawdown_days": float("nan"),
                 "ulcer_index": float("nan"),
             }
         v = pd.to_numeric(value, errors="coerce").dropna()
@@ -620,6 +680,7 @@ class Portfolio:
                 "sharpe": float("nan"),
                 "sortino": float("nan"),
                 "max_drawdown": float("nan"),
+                "longest_drawdown_days": float("nan"),
                 "ulcer_index": float("nan"),
             }
 
@@ -641,6 +702,7 @@ class Portfolio:
 
         mdd = Portfolio.max_drawdown(v)
         mg = Portfolio.max_gain(v)
+        ldd = Portfolio.longest_drawdown_days(v)
         ui = Portfolio.ulcer_index(v)
 
         return {
@@ -650,6 +712,7 @@ class Portfolio:
             "sharpe": sharpe,
             "sortino": sortino,
             "max_drawdown": mdd,
+            "longest_drawdown_days": ldd,
             "max_gain": mg,
             "ulcer_index": ui,
         }
