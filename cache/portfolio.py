@@ -151,7 +151,14 @@ def _retry_yf_download(
     return None
 
 class Portfolio:
-    def __init__(self, tickers: list[str], weights: list[float], assets: list[str] | None = None):
+    def __init__(
+        self,
+        tickers: list[str],
+        weights: list[float],
+        assets: list[str] | None = None,
+        *,
+        prices: pd.DataFrame | None = None,
+    ):
         self.tickers = tickers
         self.weights_input = weights
         if len(self.tickers) != len(self.weights_input):
@@ -175,7 +182,14 @@ class Portfolio:
             self.display_labels[t] = f"{a} ({t})" if counts.get(a, 0) > 1 else a
 
         # Prices (Close) for all tickers. Includes DBMF stitched EUR history if requested.
-        prices = Portfolio.download_prices(self.tickers, period="max", auto_adjust=True, ignore_tz=True, progress=False)
+        if prices is None or prices.empty:
+            prices = Portfolio.download_prices(self.tickers, period="max", auto_adjust=True, ignore_tz=True, progress=False)
+        else:
+            prices = prices.copy()
+            missing = [t for t in self.tickers if t not in prices.columns]
+            if missing:
+                raise ValueError(f"Missing price data for tickers: {missing}")
+            prices = prices.reindex(columns=self.tickers)
         # Keep legacy shape compatibility: Portfolio historically stored a yfinance-like "data" object
         # and exposed close prices as self.data["Close"].
         # Here we store just the Close panel under a top-level "Close" key.
@@ -244,20 +258,27 @@ class Portfolio:
         if not tickers:
             return pd.DataFrame()
 
+        tickers_norm = [str(t).strip() for t in tickers if str(t).strip()]
+        if not tickers_norm:
+            return pd.DataFrame()
+        # Cache should be order-insensitive to avoid redundant yfinance calls.
+        # We still return data in the original order.
+        cache_tickers = tuple(sorted(set(tickers_norm)))
+
         cache_key = (
             "download_prices_v2",
-            tuple(tickers),
+            cache_tickers,
             str(period),
             bool(auto_adjust),
             bool(ignore_tz),
         )
         cached = _cache_get(cache_key)
         if cached is not None and not cached.empty:
-            return cached.reindex(columns=tickers)
+            return cached.reindex(columns=tickers_norm)
 
         # Optional DBMF stitched series (kept here so we can eventually delete commodities.py).
         dbmf_series = None
-        if "DBMF" in tickers:
+        if "DBMF" in tickers_norm:
             try:
                 # Support both invocation styles:
                 # - `python cache/run.py` (sys.path contains .../cache) -> import via "assets"
@@ -280,7 +301,7 @@ class Portfolio:
 
         # Optional ZPRVX synthetic series (70% ZPRV.DE + 30% ZPRX.DE).
         zprvx_series = None
-        if "ZPRVX" in tickers:
+        if "ZPRVX" in tickers_norm:
             try:
                 try:
                     from assets.zprvx_synth import get_zprvx_series  # type: ignore
@@ -293,7 +314,7 @@ class Portfolio:
                 zprvx_series = None
 
         # Build list of tickers to download from yfinance (exclude synthetic ones)
-        tickers_to_download = tickers.copy()
+        tickers_to_download = tickers_norm.copy()
         if dbmf_series is not None and "DBMF" in tickers_to_download:
             tickers_to_download = [t for t in tickers_to_download if t != "DBMF"]
         if zprvx_series is not None and "ZPRVX" in tickers_to_download:
@@ -323,35 +344,49 @@ class Portfolio:
 
         prices = pd.DataFrame()
         if tickers_to_download:
-            # First bulk attempt
-            raw = _retry_yf_download(
-                tickers_to_download,
-                period=period,
-                auto_adjust=auto_adjust,
-                ignore_tz=ignore_tz,
-                progress=progress,
-                threads=threads,
-                max_retries=6,
-                base_delay=1.0,
-            )
-            prices = _raw_to_prices(raw, tickers_to_download)
+            # First bulk attempt (best-effort)
+            raw = None
+            try:
+                raw = _retry_yf_download(
+                    tickers_to_download,
+                    period=period,
+                    auto_adjust=auto_adjust,
+                    ignore_tz=ignore_tz,
+                    progress=progress,
+                    threads=threads,
+                    max_retries=6,
+                    base_delay=1.0,
+                )
+            except Exception as e:
+                logger.warning(f"yfinance bulk download failed for {tickers_to_download}: {e}")
+                raw = None
 
-            # IMPORTANT: yfinance can return a valid frame but with a subset of tickers all-NaN on cold start.
-            # Retry missing tickers individually and merge.
-            missing = [t for t in tickers_to_download if t not in prices.columns or prices[t].dropna().empty]
+            if raw is not None:
+                prices = _raw_to_prices(raw, tickers_to_download)
+
+            # IMPORTANT: yfinance can return a valid frame but with a subset of tickers all-NaN on cold start,
+            # or the bulk call can fail entirely. Retry missing tickers individually and merge.
+            if raw is None:
+                missing = list(tickers_to_download)
+            else:
+                missing = [t for t in tickers_to_download if t not in prices.columns or prices[t].dropna().empty]
             if missing:
                 logger.info(f"yfinance returned empty series for tickers {missing}; retrying individually...")
                 for t in missing:
-                    raw_t = _retry_yf_download(
-                        [t],
-                        period=period,
-                        auto_adjust=auto_adjust,
-                        ignore_tz=ignore_tz,
-                        progress=progress,
-                        threads=False,
-                        max_retries=6,
-                        base_delay=1.0,
-                    )
+                    try:
+                        raw_t = _retry_yf_download(
+                            [t],
+                            period=period,
+                            auto_adjust=auto_adjust,
+                            ignore_tz=ignore_tz,
+                            progress=progress,
+                            threads=False,
+                            max_retries=6,
+                            base_delay=1.0,
+                        )
+                    except Exception as e:
+                        logger.warning(f"yfinance single-ticker download failed for {t}: {e}")
+                        continue
                     px_t = _raw_to_prices(raw_t, [t])
                     # If still empty, keep as NaN column; downstream will raise a clear error.
                     if not px_t.empty and t in px_t.columns and not px_t[t].dropna().empty:
@@ -368,7 +403,7 @@ class Portfolio:
             prices = prices.join(zprvx_series, how="outer")
 
         # Keep columns in requested order (and drop extras).
-        prices = prices.reindex(columns=tickers)
+        prices = prices.reindex(columns=tickers_norm)
         if not prices.empty:
             _cache_set(cache_key, prices)
         return prices

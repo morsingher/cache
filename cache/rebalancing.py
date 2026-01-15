@@ -676,6 +676,14 @@ def _safe_filename(s: str) -> str:
     return out or "portfolio"
 
 
+def _df_to_csv_block(df: pd.DataFrame, *, index_label: str | None = None) -> str:
+    table = df.copy()
+    if index_label:
+        table.index = table.index.astype(str)
+        table.index.name = str(index_label)
+    return "```csv\n" + table.to_csv(index=True) + "```\n\n"
+
+
 def build_llm_rebalance_report(
     portfolio: Any,
     rebalance_table: pd.DataFrame,
@@ -684,6 +692,7 @@ def build_llm_rebalance_report(
     current_value: float,
     new_cash: float,
     macro_trends: dict[str, dict[str, float | None]] | None = None,
+    user_preferences: str | None = None,
 ) -> str:
     """
     Generate an LLM prompt in the same markdown structure used in dashboard.py,
@@ -780,7 +789,10 @@ def build_llm_rebalance_report(
         "risk constraints, and idiosyncratic opportunities). Use it as a reference point, and propose deviations only when "
         "you can justify the trade-off.\n\n"
     )
-    baseline_section.append("```\n" + rebalance_table.round(4).T.to_string() + "\n```\n\n")
+    baseline_section.append(
+        "The table below is CSV with a header row. The first column is the row label (Metric).\n\n"
+    )
+    baseline_section.append(_df_to_csv_block(rebalance_table.round(4).T, index_label="Metric"))
 
     question = (
         "Considering the macro snapshot and the portfolio diagnostics below, "
@@ -793,6 +805,13 @@ def build_llm_rebalance_report(
     report: list[str] = []
     report.append("## System prompt\n\n")
     report.append(system_prompt + "\n\n")
+    if user_preferences and str(user_preferences).strip():
+        report.append("## User preferences\n\n")
+        report.append("User preferences are optional, but should be used to guide the allocation decision. "
+                      "For example, if the user wants to minimize transaction costs, propose an alternative allocation to account for this. "
+                      "Similarly, if the user wants to harvest a tax loss, then you are allowed to sell the assets the user indicates, even if rebalancing should be buy-only. "
+                      "If the user does not specify any asset to use for harvesting, then suggest one but warn the user to check fiscal rules in their country.\n")
+        report.append("```\n" + str(user_preferences).strip() + "\n```\n\n")
     report.append("## Macro-economic snapshot\n\n")
     report.append("```\n" + "\n".join(macro_lines) + "\n```\n\n")
     report.append("## Portfolio diagnostics (assets as columns)\n\n")
@@ -800,7 +819,11 @@ def build_llm_rebalance_report(
     if diagnostics_table is None:
         report.append("Diagnostics: unavailable.\n\n")
     else:
-        report.append("```\n" + diagnostics_table.round(4).T.to_string() + "\n```\n\n")
+        report.append(
+            "The table below is CSV with a header row. "
+            "The first column is the row label (Metric).\n\n"
+        )
+        report.append(_df_to_csv_block(diagnostics_table.round(4).T, index_label="Metric"))
     report.append("## Cash inputs\n\n")
     report.append(
         "```\n"

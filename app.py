@@ -14,6 +14,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import streamlit as st
+import streamlit.components.v1 as components
 import random
 
 
@@ -61,6 +62,58 @@ def _timed_step(placeholder, label: str, start_time: float) -> None:
     placeholder.write(f"{label} Done! ({elapsed:.2f}s)")
 
 
+def _render_copy_button(prompt: str, *, key: str, label: str = "Copy prompt") -> None:
+    html = f"""
+    <div>
+      <style>
+        #copy-btn-{key} {{
+          padding: 0.4rem 0.85rem;
+          border-radius: 0.5rem;
+          border: 1px solid #d6d3c7;
+          background: #ecebe3;
+          color: #2f2f2f;
+          font-weight: 600;
+          font-size: 0.95rem;
+          cursor: pointer;
+          transition: background-color 120ms ease, border-color 120ms ease, box-shadow 120ms ease;
+        }}
+        #copy-btn-{key}:hover {{
+          background: #e5e3da;
+          border-color: #cfcab7;
+        }}
+        #copy-btn-{key}:active {{
+          background: #ddd9cc;
+          border-color: #c4bea9;
+        }}
+      </style>
+      <button id="copy-btn-{key}">
+        {label}
+      </button>
+      <span id="copy-status-{key}" style="margin-left: 0.5rem; color: #6b7280; font-size: 0.9em;"></span>
+    </div>
+    <script>
+      const text = {json.dumps(prompt)};
+      const btn = document.getElementById("copy-btn-{key}");
+      const status = document.getElementById("copy-status-{key}");
+      btn.addEventListener("click", async () => {{
+        try {{
+          await navigator.clipboard.writeText(text);
+        }} catch (e) {{
+          const ta = document.createElement("textarea");
+          ta.value = text;
+          document.body.appendChild(ta);
+          ta.select();
+          document.execCommand("copy");
+          document.body.removeChild(ta);
+        }}
+        status.textContent = "Copied";
+        setTimeout(() => status.textContent = "", 1500);
+      }});
+    </script>
+    """
+    components.html(html, height=40)
+
+
 # --- Import backend exactly like the CLI does (modules live in ./cache) ---
 REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
 CACHE_DIR = os.path.join(REPO_ROOT, "cache")
@@ -87,7 +140,6 @@ from whatif import (  # noqa: E402
 )
 from openrouter import (  # noqa: E402
     fetch_free_models,
-    fetch_limits,
     chat_completion,
     chat_completion_messages,
     get_api_key,
@@ -174,7 +226,7 @@ def _cached_get_macro_snapshot(fred_api_key: str | None) -> Any:
     return get_macro_snapshot(fred_api_key=fred_api_key, debug=False)
 
 
-st.set_page_config(page_title="CACHE", page_icon="€", layout="centered")
+st.set_page_config(page_title="CACH€", page_icon="€", layout="centered")
 
 # Register pastel color theme for Altair charts
 @alt.theme.register("pastel", enable=True)
@@ -268,6 +320,28 @@ h4 a[href^="#"] {
     unsafe_allow_html=True,
 )
 
+
+def _clear_analysis_results() -> None:
+    keys_to_clear = [
+        "analyze_results",
+        "compare_results",
+        "rebalance_results",
+        "whatif_results",
+        "rebalance_chat_history",
+        "rebalance_chat_started",
+        "rebalance_chat_model",
+        "rebalance_chat_error",
+        "whatif_chat_history",
+        "whatif_chat_started",
+        "whatif_chat_model",
+        "whatif_chat_error",
+        "rebalance_prompt_copy",
+        "whatif_prompt_copy",
+    ]
+    for key in keys_to_clear:
+        if key in st.session_state:
+            del st.session_state[key]
+
 def _rf_annual_controls(*, key_prefix: str, default_series: str = "ECBDFR") -> float:
     mode = st.radio(
         "Risk-free rate",
@@ -300,7 +374,7 @@ def _rf_annual_controls(*, key_prefix: str, default_series: str = "ECBDFR") -> f
         st.error("Set `FRED_API_KEY` in `.streamlit/secrets.toml` to use FRED data.")
         return 0.0
 
-    @st.cache_data(ttl=3600, show_spinner=False)
+    @st.cache_data(ttl=3600, show_spinner="Fetching FRED data (cached)...")
     def _cached_latest_fred_pct(_series_id: str, _api_key: str) -> float | None:
         # FRED can intermittently fail on cold starts; retry with backoff + jitter.
         fred = Fred(api_key=_api_key)
@@ -703,11 +777,13 @@ def _render_asset_help_dropdown() -> None:
     assets = sorted(assets, key=lambda a: str(a.get("Name", "")).lower())
     if not assets:
         return
-    
-    with st.expander("💡 Need help choosing assets?", expanded=False):
-        # Compute once (cached) instead of per-asset.
-        tickers_all = [str(a.get("Ticker", "")).strip() for a in assets if str(a.get("Ticker", "")).strip()]
+
+    # Compute once (cached) instead of per-asset.
+    tickers_all = [str(a.get("Ticker", "")).strip() for a in assets if str(a.get("Ticker", "")).strip()]
+    with st.spinner("Loading asset data (may take a few seconds)..."):
         date_ranges = _cached_price_date_ranges(tuple(sorted(set(tickers_all))))
+
+    with st.expander("💡 Need help choosing assets?", expanded=False):
         for asset in assets:
             name = asset.get("Name", "")
             ticker = asset.get("Ticker", "")
@@ -859,7 +935,8 @@ def _build_portfolio_from_manual(
     weights = data["Weight (%)"].to_list()
     targets = data["Target (%)"].to_list()
 
-    p = Portfolio(tickers=tickers, weights=weights, assets=assets)
+    prices = _cached_download_prices(tuple(sorted(tickers)))
+    p = Portfolio(tickers=tickers, weights=weights, assets=assets, prices=prices)
     p.name = str(portfolio_name).strip() or "Portfolio"
     p.current_value_eur = float(value_eur) if value_eur is not None else None
     p.actual_weights_pct = {t: float(w) for t, w in zip(tickers, weights)}
@@ -1718,7 +1795,6 @@ def _render_llm_query_ui(
     Includes:
     - API key check
     - Model selection (free models only)
-    - Usage/limits display
     - Start chat button (for initial query)
     - Interactive chat interface with message history
     """
@@ -1738,48 +1814,7 @@ def _render_llm_query_ui(
     chat_history_key = f"{key_prefix}_chat_history"
     chat_started_key = f"{key_prefix}_chat_started"
     chat_model_key = f"{key_prefix}_chat_model"
-    total_tokens_key = f"{key_prefix}_total_tokens"
     chat_error_key = f"{key_prefix}_chat_error"  # Track last error separately
-    
-    # Fetch and display limits
-    with st.expander("API Usage and Limits", expanded=False):
-        limits = fetch_limits(api_key)
-        if limits is not None:
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                if limits.credits_remaining is not None and limits.credit_limit is not None:
-                    st.metric(
-                        "Credits Remaining",
-                        f"${limits.credits_remaining:.4f}",
-                        delta=None,
-                    )
-                elif limits.credits_remaining is not None:
-                    st.metric("Credits Remaining", f"${limits.credits_remaining:.4f}")
-                else:
-                    st.metric("Credits Remaining", "Unlimited (free tier)")
-            with col2:
-                if limits.usage_daily is not None:
-                    st.metric("Daily Usage", f"${limits.usage_daily:.4f}")
-                else:
-                    st.metric("Daily Usage", "N/A")
-            with col3:
-                if limits.rate_limit_requests and limits.rate_limit_interval:
-                    st.metric(
-                        "Rate Limit",
-                        f"{limits.rate_limit_requests} req/{limits.rate_limit_interval}",
-                    )
-                else:
-                    st.metric("Rate Limit", "Default")
-            
-            st.caption(
-                "**Free tier limits:** 20 requests/minute, 200 requests/day. "
-                "Models with `:free` suffix have no token cost but may have usage limits."
-            )
-        else:
-            st.warning("Could not fetch usage limits.")
-            st.caption(
-                "**Typical free tier limits:** 20 requests/minute, 200 requests/day."
-            )
     
     # Model selection
     # Use cached free models list to avoid repeated API calls
@@ -1808,39 +1843,6 @@ def _render_llm_query_ui(
         disabled=chat_started,
     )
     
-    # Initialize advanced settings in session state with defaults if not present
-    max_tokens_key = f"{key_prefix}_max_tokens"
-    temperature_key = f"{key_prefix}_temperature"
-    if max_tokens_key not in st.session_state:
-        st.session_state[max_tokens_key] = 4000
-    if temperature_key not in st.session_state:
-        st.session_state[temperature_key] = 0.7
-    
-    # Advanced settings - use a container to prevent duplication issues
-    advanced_container = st.container()
-    with advanced_container:
-        with st.expander("Advanced Settings", expanded=False):
-            st.slider(
-                "Max response tokens",
-                min_value=500,
-                max_value=8000,
-                value=st.session_state[max_tokens_key],
-                step=500,
-                key=max_tokens_key,
-                help="Maximum number of tokens in the LLM response. Higher = longer responses.",
-                disabled=chat_started,
-            )
-            st.slider(
-                "Temperature",
-                min_value=0.0,
-                max_value=1.0,
-                value=st.session_state[temperature_key],
-                step=0.1,
-                key=temperature_key,
-                help="Higher = more creative, lower = more focused/deterministic.",
-                disabled=chat_started,
-            )
-    
     # If chat hasn't started yet, show the "Start Chat" button
     if not chat_started:
         col1, col2 = st.columns([1, 1])
@@ -1852,7 +1854,6 @@ def _render_llm_query_ui(
                 ]
                 st.session_state[chat_started_key] = True
                 st.session_state[chat_model_key] = selected_model
-                st.session_state[total_tokens_key] = 0
                 st.rerun()
         with col2:
             # Show a hint about what will happen
@@ -1874,7 +1875,6 @@ def _render_llm_query_ui(
     # Chat has started - show the chat interface
     chat_history: list[dict[str, str]] = st.session_state.get(chat_history_key, [])
     model = st.session_state.get(chat_model_key, selected_model)
-    total_tokens_used = st.session_state.get(total_tokens_key, 0)
     last_error: str | None = st.session_state.get(chat_error_key, None)
     
     # Check if we need to get the initial response (first user message sent, no assistant reply yet)
@@ -1924,11 +1924,8 @@ def _render_llm_query_ui(
         # If waiting for response, show loading indicator INSIDE the chat
         elif needs_response:
             with st.chat_message("assistant"):
-                with st.spinner("Thinking..."):
+                with st.spinner("Thinking (may take a few seconds)..."):
                     # Get values from session state
-                    max_tokens_val = st.session_state.get(max_tokens_key, 4000)
-                    temperature_val = st.session_state.get(temperature_key, 0.7)
-                    
                     # Build messages with system prompt
                     messages_to_send = [SYSTEM_MESSAGE] + chat_history
                     
@@ -1936,8 +1933,8 @@ def _render_llm_query_ui(
                         messages=messages_to_send,
                         model=str(model),
                         api_key=api_key,
-                        max_tokens=int(max_tokens_val),
-                        temperature=float(temperature_val),
+                        max_tokens=4000,
+                        temperature=0.7,
                     )
                     
                     if response.error:
@@ -1950,16 +1947,7 @@ def _render_llm_query_ui(
                         # Add assistant response to history
                         chat_history.append({"role": "assistant", "content": response.content})
                         st.session_state[chat_history_key] = chat_history
-                        # Track total tokens
-                        if response.total_tokens:
-                            total_tokens_used += response.total_tokens
-                            st.session_state[total_tokens_key] = total_tokens_used
-                    
                     st.rerun()
-    
-    # Show token usage
-    if total_tokens_used > 0:
-        st.caption(f"Total tokens used in this conversation: {total_tokens_used:,}")
     
     # Chat input for follow-up messages
     user_input = st.chat_input("Type your follow-up question...", key=f"{key_prefix}_chat_input")
@@ -1979,7 +1967,7 @@ def _render_llm_query_ui(
     with col1:
         if st.button("🔄 Reset Chat", key=f"{key_prefix}_reset_chat_btn"):
             # Clear chat-related session state (including error state)
-            for key in [chat_history_key, chat_started_key, chat_model_key, total_tokens_key, chat_error_key]:
+            for key in [chat_history_key, chat_started_key, chat_model_key, chat_error_key]:
                 if key in st.session_state:
                     del st.session_state[key]
             st.rerun()
@@ -1995,32 +1983,44 @@ def _render_title() -> None:
     # )
     st.markdown(
         """
-        <h1 data-testid="stHeading" style="text-align: center;">
-            CACH<span style="
-                font-weight: 700; 
-                display: inline-block; 
-                transform: scaleX(1.3); 
-                transform-origin: left;
-                margin-right: 0.1em;
-            ">€</span>
-        </h1>
+        <div style="text-align: center;">
+            <a href="?go=home" target="_self" style="text-decoration: none; color: inherit;">
+                <h1 data-testid="stHeading" style="margin-bottom: 0;">
+                    CACH<span style="
+                        font-weight: 700; 
+                        display: inline-block; 
+                        transform: scaleX(1.3); 
+                        transform-origin: left;
+                        margin-right: 0.1em;
+                    ">€</span>
+                </h1>
+            </a>
+        </div>
         """,
         unsafe_allow_html=True,
     )
     # Center ONLY this subtitle (other section headers should remain left-aligned).
     st.markdown(
-        '<div style="text-align: center;"><h3 style="margin-top: 0;">Your financial assistant.</h3></div>',
+        '<div style="text-align: center;"><h3 style="margin-top: 0;">Your financial assistant. </h3></div>',
         unsafe_allow_html=True,
     )
 
 
 def _go(page: str) -> None:
+    if page == "home":
+        _clear_analysis_results()
     st.session_state["page"] = page
     st.rerun()
 
 
 if "page" not in st.session_state:
     st.session_state["page"] = "home"
+
+go = st.query_params.get("go")
+if go == "home":
+    _clear_analysis_results()
+    st.session_state["page"] = "home"
+    st.query_params.clear()
 
 _render_title()
 
@@ -2058,16 +2058,43 @@ if page == "home":
     
     # Global help section
     st.markdown("")
-    with st.expander("ℹ️ What can this app do?", expanded=False):
+    with st.expander("ℹ️ FAQs", expanded=False):
         st.markdown("""
-**Analyze a portfolio** — Evaluate a single portfolio's historical performance. See key metrics like CAGR, volatility, Sharpe ratio, and max drawdown. Visualize how your portfolio would have grown over time and understand correlations between assets.
+**What can this app do?**
 
-**Compare portfolios** — Put multiple portfolios side-by-side to see which performed better historically. Useful for evaluating different allocation strategies (e.g., 60/40 vs 80/20) or comparing your portfolio against benchmarks.
+This app can help you manage your portfolio in 4 ways:
+- Analyze its historical performance and understand correlations between assets.
+- Compare it against other benchmark portfolios.
+- Rebalance it with new cash, by considering deviations from target weights, macroeconomic conditions, trends, transaction costs and fiscal optimizations. An AI will assist you in the process.
+- Explore what happens if you add new assets in terms of diversification and risk-adjusted returns. An AI will assist you in the process.
 
-**Rebalance with new cash** — Calculate how to allocate new money to bring your portfolio back to target weights without selling. Includes a macro dashboard (EU/DE + US snapshot + 12-month trend charts) and optional AI-assisted recommendations.
+**Who is this app intended for?**
 
-**What-if: add an asset** — Explore what would happen if you added a new asset to your portfolio. Analyze diversification benefits, risk-adjusted returns, and backtest the modified portfolio against your baseline.
-        """)
+This app is intended for long-term, passive investors with EUR-denominated portfolios built with ETFs. 
+If you are interested in active management, short-term operations or individual securities, this app is not for you.
+
+**Which assets are available and what is the data source?**
+
+This app supports a wide range of ETFs covering virtually any existing asset class. A complete list with additional information is available within each section.
+Historical prices are downloaded from Yahoo Finance using their [free API](https://ranaroussi.github.io/yfinance/reference/index.html), while macroeconomic data is downloaded from [FRED](https://fred.stlouisfed.org/).
+
+**How does the AI assist you?**
+
+In order to optimize multi-objective problems such as rebalancing and what-if scenarios, this app uses a combination of statistical techniques and LLM-assisted reasoning.
+In practice, a very detailed prompt is built from analysis results and user preferences, which can be either manually copied and pasted by the user into
+their preferred LLM, or used directly within the app through the [OpenRouter API](https://openrouter.ai/).
+In this case, only free tier models are available, so take the responses with a grain of salt.
+
+**Why is it slow at startup?**
+
+Free APIs are very convenient, but also potentially slow. For this reason, this app caches all data, but it needs a few seconds
+at startup to download it safely. Hosting on [Streamlit Cloud](https://streamlit.io/cloud) is also free and convenient, but 
+it may not be the fastest infrastructure ever.
+
+**Why is it called CACH€?**
+
+The name is an intended pun on the word "cache", which is pronounced as "cash", but has a widespread use in computer science.
+""")
 
 
 elif page == "analyze":
@@ -2841,6 +2868,13 @@ This section helps you allocate new cash to your portfolio to move closer to you
         if not fred_api_key:
             st.error("FRED_API_KEY is not set. Please add it to `.streamlit/secrets.toml`.")
 
+        user_prefs = st.text_area(
+            "User preferences (optional)",
+            placeholder="Example 1: I want to minimize transaction costs.\nExample 2: In this moment, I prefer more/less risky assets.\nExample 3: I have a tax loss of X to harvest before date Y by selling asset Z.",
+            key="rebalance_user_prefs",
+            help="Add any constraints or preferences to include in the LLM prompt.",
+        )
+
         run = st.button("Compute rebalance", type="primary", key="rebalance_run")
         if run:
             with st.status("Computing rebalance...", expanded=True) as status:
@@ -2878,10 +2912,9 @@ This section helps you allocate new cash to your portfolio to move closer to you
 
                     _timed_step(step_ph, "Computing portfolio diagnostics...", step_start)
                     step_ph = st.empty()
-                    step_ph.write("Fetching macro data from FRED...")
                     step_start = time.time()
-                    
-                    snap = _cached_get_macro_snapshot(fred_api_key=fred_api_key)
+                    with st.spinner("Fetching macro data from FRED..."):
+                        snap = _cached_get_macro_snapshot(fred_api_key=fred_api_key)
                     
                     # Fetch macro chart data
                     macro_charts: dict[str, list[dict[str, object]]] = {"eu_de": [], "us": [], "fx": [], "earnings": []}
@@ -2985,6 +3018,7 @@ This section helps you allocate new cash to your portfolio to move closer to you
                                 current_value=float(current_value),
                                 new_cash=float(new_cash),
                                 macro_trends=macro_trends if macro_trends else None,
+                                user_preferences=user_prefs,
                             )
                         except Exception:
                             pass
@@ -3273,16 +3307,15 @@ If the global estimate is unavailable (Yahoo fundamentals can be flaky on Stream
             if results["llm_prompt"]:
                 st.markdown("### AI-Assisted Rebalancing")
                 st.caption("Use the prompt below with your preferred LLM, or query one directly.")
-
-                st.download_button(
-                    "Download prompt (.md)",
-                    data=results["llm_prompt"].encode("utf-8"),
-                    file_name=f"rebalance_prompt_{results['portfolio_name'].replace(' ', '_')}.md",
-                    mime="text/markdown",
-                    key="rebalance_download_prompt",
-                )
-                with st.expander("View prompt", expanded=False):
-                    st.markdown(results["llm_prompt"])
+                with st.expander("View/copy prompt", expanded=False):
+                    st.text_area(
+                        "Prompt (copyable)",
+                        value=results["llm_prompt"],
+                        height=300,
+                        key="rebalance_prompt_copy",
+                        help="Select all and copy (Ctrl/Cmd+C).",
+                    )
+                    # _render_copy_button(results["llm_prompt"], key="rebalance_copy_btn")
 
                 # Inline LLM query UI (no separate header)
                 _render_llm_query_ui(
@@ -3443,6 +3476,13 @@ This section explores what would happen if you added a new asset to your portfol
             key="whatif_y_scale",
         )
 
+        user_prefs = st.text_area(
+            "User preferences (optional)",
+            placeholder="Example: I prefer assets with more/less volatility.",
+            key="whatif_user_prefs",
+            help="Add any constraints or preferences to include in the LLM prompt.",
+        )
+
         run = st.button("Run what-if", type="primary", key="whatif_run")
 
         if run:
@@ -3470,11 +3510,10 @@ This section explores what would happen if you added a new asset to your portfol
                     base_target_weights = _target_weights_fraction(p)
 
                     step_ph = st.empty()
-                    step_ph.write("Downloading price data...")
                     step_start = time.time()
-                    
                     tickers_universe = list(getattr(p, "tickers", [])) + [c for c in candidates if c not in getattr(p, "tickers", [])]
-                    prices_universe = _cached_download_prices(tuple(sorted(tickers_universe)))
+                    with st.spinner("Downloading price data..."):
+                        prices_universe = _cached_download_prices(tuple(sorted(tickers_universe)))
 
                     portfolio_tickers = list(getattr(p, "tickers", []))
                     candidate_cols = [c for c in candidates if c in prices_universe.columns]
@@ -3698,6 +3737,7 @@ This section explores what would happen if you added a new asset to your portfol
                             backtest_df=llm_backtest_df,
                             analysis_start=analysis_start_str,
                             analysis_end=analysis_end_str,
+                            user_preferences=user_prefs,
                         )
                     except Exception:
                         pass
@@ -3871,16 +3911,15 @@ This table compares historical performance between your baseline portfolio and p
             if results["llm_prompt"]:
                 st.markdown("### AI-Assisted Asset Selection")
                 st.caption("Use the prompt below with your preferred LLM, or query one directly.")
-
-                st.download_button(
-                    "Download prompt (.md)",
-                    data=results["llm_prompt"].encode("utf-8"),
-                    file_name=f"whatif_prompt_{results['portfolio_name'].replace(' ', '_')}.md",
-                    mime="text/markdown",
-                    key="whatif_download_prompt",
-                )
-                with st.expander("View prompt", expanded=False):
-                    st.markdown(results["llm_prompt"])
+                with st.expander("View/copy prompt", expanded=False):
+                    st.text_area(
+                        "Prompt (copyable)",
+                        value=results["llm_prompt"],
+                        height=300,
+                        key="whatif_prompt_copy",
+                        help="Select all and copy (Ctrl/Cmd+C).",
+                    )
+                    # _render_copy_button(results["llm_prompt"], key="whatif_copy_btn")
 
                 # Inline LLM query UI (no separate header)
                 _render_llm_query_ui(

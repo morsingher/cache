@@ -667,6 +667,14 @@ def _safe_filename(s: str) -> str:
     return out or "portfolio"
 
 
+def _df_to_csv_block(df: pd.DataFrame, *, index_label: str | None = None) -> str:
+    table = df.copy()
+    if index_label:
+        table.index = table.index.astype(str)
+        table.index.name = str(index_label)
+    return "```csv\n" + table.to_csv(index=True) + "```\n\n"
+
+
 def build_llm_whatif_report(
     portfolio: Any,
     candidates: list[str],
@@ -678,6 +686,7 @@ def build_llm_whatif_report(
     backtest_df: pd.DataFrame,
     analysis_start: str,
     analysis_end: str,
+    user_preferences: str | None = None,
 ) -> str:
     """
     Generate an LLM prompt for what-if analysis, structured as:
@@ -803,22 +812,37 @@ def build_llm_whatif_report(
 
     report.append("## Portfolio Overview\n\n")
     report.append("```\n" + "\n".join(overview_lines) + "\n```\n\n")
+    if user_preferences and str(user_preferences).strip():
+        report.append("## User preferences\n\n")
+        report.append("```\n" + str(user_preferences).strip() + "\n```\n\n")
 
     report.append(diversification_explain)
     if diversification_df is not None and not diversification_df.empty:
-        report.append("\n```\n" + diversification_df.to_string() + "\n```\n\n")
+        report.append(
+            "\nThe table below is CSV with a header row. "
+            "The first column is the row label (Metric).\n\n"
+        )
+        report.append(_df_to_csv_block(diversification_df, index_label="Metric"))
     else:
         report.append("\nDiversification data: unavailable.\n\n")
 
     report.append(rrr_explain)
     if rrr_df is not None and not rrr_df.empty:
-        report.append("\n```\n" + rrr_df.to_string() + "\n```\n\n")
+        report.append(
+            "\nThe table below is CSV with a header row. "
+            "The first column is the row label (Metric).\n\n"
+        )
+        report.append(_df_to_csv_block(rrr_df, index_label="Metric"))
     else:
         report.append("\nRRR data: unavailable.\n\n")
 
     report.append(backtest_explain)
     if backtest_df is not None and not backtest_df.empty:
-        report.append("\n```\n" + backtest_df.to_string() + "\n```\n\n")
+        report.append(
+            "\nThe table below is CSV with a header row. "
+            "The first column is the row label (Portfolio).\n\n"
+        )
+        report.append(_df_to_csv_block(backtest_df, index_label="Portfolio"))
     else:
         report.append("\nBacktest data: unavailable.\n\n")
 
