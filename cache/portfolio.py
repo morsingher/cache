@@ -813,9 +813,15 @@ class Portfolio:
         return float(num / np.sqrt(den_sq))
 
     @classmethod
-    def from_json(cls, path: str) -> "Portfolio":
+    def from_dict(
+        cls,
+        obj: dict,
+        *,
+        source: str | None = None,
+        prices: pd.DataFrame | None = None,
+    ) -> "Portfolio":
         """
-        Load a portfolio from a JSON file.
+        Build a portfolio from a JSON-like dict.
 
         Expected schema (extended):
         {
@@ -827,13 +833,11 @@ class Portfolio:
           "Value": 80200.0
         }
         """
-        with open(path, "r", encoding="utf-8") as f:
-            obj = json.load(f)
-
         name = str(obj.get("Name", "Portfolio"))
         assets_list = obj.get("Assets")
         if not isinstance(assets_list, list) or not assets_list:
-            raise ValueError(f"Invalid portfolio json: missing/non-list 'Assets' in {path}")
+            src = f" in {source}" if source else ""
+            raise ValueError(f"Invalid portfolio json: missing/non-list 'Assets'{src}")
 
         tickers: list[str] = []
         weights: list[float] = []  # current/actual weights
@@ -859,20 +863,31 @@ class Portfolio:
         t_sum = float(sum(targets))
         tol = 0.25  # percentage points
         if abs(w_sum - 100.0) > tol:
+            src = f" in {source}" if source else ""
             raise ValueError(
-                f"Invalid portfolio json in {path}: current weights ('Weight') must sum to 100; got {w_sum:.4f}"
+                f"Invalid portfolio json{src}: current weights ('Weight') must sum to 100; got {w_sum:.4f}"
             )
         if abs(t_sum - 100.0) > tol:
+            src = f" in {source}" if source else ""
             raise ValueError(
-                f"Invalid portfolio json in {path}: target weights ('Target') must sum to 100; got {t_sum:.4f}"
+                f"Invalid portfolio json{src}: target weights ('Target') must sum to 100; got {t_sum:.4f}"
             )
 
-        p = cls(tickers, weights, assets=assets)
+        p = cls(tickers, weights, assets=assets, prices=prices)
         p.name = name
         p.current_value_eur = float(obj.get("Value")) if obj.get("Value") is not None else None
         p.actual_weights_pct = {t: float(w) for t, w in zip(tickers, weights)}
         p.target_weights_pct = {t: float(w) for t, w in zip(tickers, targets)}
         return p
+
+    @classmethod
+    def from_json(cls, path: str, *, prices: pd.DataFrame | None = None) -> "Portfolio":
+        """
+        Load a portfolio from a JSON file.
+        """
+        with open(path, "r", encoding="utf-8") as f:
+            obj = json.load(f)
+        return cls.from_dict(obj, source=path, prices=prices)
 
     @staticmethod
     def _normalize_weights_to_fraction(weights: list[float]) -> np.ndarray:

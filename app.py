@@ -204,19 +204,116 @@ def _retry_on_rate_limit(fn, *args, max_retries: int = 5, initial_wait: float = 
         raise last_error
 
 
-@st.cache_resource(ttl=3600, show_spinner="Loading portfolio (downloading price data, may retry on transient errors)...")
+@st.cache_resource(ttl=3600, show_spinner="Loading portfolio (cached prices)...")
 def _cached_load_portfolio(path: str) -> Portfolio:
     """
     Cache the entire Portfolio object (including downloaded prices).
     Uses cache_resource since Portfolio objects are not serializable.
     """
-    return _retry_on_rate_limit(Portfolio.from_json, path)
+    with open(path, "r", encoding="utf-8") as f:
+        obj = json.load(f)
+    return _retry_on_rate_limit(_portfolio_from_json_obj_with_cache, obj, source=path)
 
 
 @st.cache_data(ttl=3600, show_spinner="Downloading price data (may retry on transient errors)...")
 def _cached_download_prices(tickers_tuple: tuple[str, ...]) -> pd.DataFrame:
     """Cached wrapper for Portfolio.download_prices with retry support."""
     return _retry_on_rate_limit(Portfolio.download_prices, list(tickers_tuple))
+
+
+
+# Use st.session_state for persistent session-level caching
+if "prices_cache" not in st.session_state:
+    st.session_state["prices_cache"] = {}
+
+
+def _store_prices_in_cache(prices: pd.DataFrame) -> None:
+    if "prices_cache" not in st.session_state:
+        st.session_state["prices_cache"] = {}
+        
+    if prices is None or prices.empty:
+        return
+    for t in prices.columns:
+        s = pd.to_numeric(prices[t], errors="coerce").dropna()
+        if not s.empty:
+            st.session_state["prices_cache"][str(t)] = s.copy()
+
+
+def _get_prices_and_store(tickers_tuple: tuple[str, ...]) -> pd.DataFrame:
+    if "prices_cache" not in st.session_state:
+        st.session_state["prices_cache"] = {}
+        
+    tickers_norm = [str(t).strip() for t in tickers_tuple if str(t).strip()]
+    if not tickers_norm:
+        return pd.DataFrame()
+
+    # Check for missing tickers in session state
+    missing = [t for t in tickers_norm if t not in st.session_state["prices_cache"]]
+    
+    if missing:
+        # Download only the missing tickers
+        # Using sorted tuple ensures st.cache_data hits if this specific subset was downloaded before
+        prices_new = _cached_download_prices(tuple(sorted(set(missing))))
+        _store_prices_in_cache(prices_new)
+    
+    # Reconstruct the requested dataframe from session state
+    data = {}
+    available_tickers = []
+    for t in tickers_norm:
+        if t in st.session_state["prices_cache"]:
+            data[t] = st.session_state["prices_cache"][t]
+            available_tickers.append(t)
+            
+    if not data:
+        return pd.DataFrame()
+        
+    prices = pd.concat(data, axis=1)
+    # Ensure correct column order and handling
+    prices = prices.reindex(columns=available_tickers)
+    return prices
+
+
+def _get_cached_prices_only(tickers: list[str], *, source: str) -> pd.DataFrame:
+    if "prices_cache" not in st.session_state:
+        st.session_state["prices_cache"] = {}
+        
+    tickers_norm = [str(t).strip() for t in tickers if str(t).strip()]
+    if not tickers_norm:
+        return pd.DataFrame()
+        
+    missing = [t for t in tickers_norm if t not in st.session_state["prices_cache"]]
+    if missing:
+        raise ValueError(
+            "Price data not cached yet for: "
+            f"{missing}. Please run any analysis once to cache prices, then retry {source}."
+        )
+        
+    data = {t: st.session_state["prices_cache"][t] for t in tickers_norm}
+    prices = pd.concat(data, axis=1)
+    # Ensure correct column order
+    prices = prices.reindex(columns=tickers_norm)
+    return prices
+
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _cached_portfolio_name(path: str) -> str:
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            obj = json.load(f)
+        name = str(obj.get("Name", "")).strip()
+        return name if name else os.path.basename(path)
+    except Exception:
+        return os.path.basename(path)
+
+
+def _portfolio_from_json_obj_with_cache(obj: dict[str, Any], *, source: str) -> Portfolio:
+    assets_list = obj.get("Assets")
+    if not isinstance(assets_list, list) or not assets_list:
+        raise ValueError(f"Invalid portfolio json: missing/non-list 'Assets' in {source}")
+    tickers = [str(a.get("Ticker", "")).strip() for a in assets_list if str(a.get("Ticker", "")).strip()]
+    prices = _get_prices_and_store(tuple(sorted(set(tickers)))) if tickers else pd.DataFrame()
+    return Portfolio.from_dict(obj, source=source, prices=prices)
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -451,7 +548,7 @@ def _safe_temp_json(content: bytes) -> str:
     return f.name
 
 
-def _render_example_json_ui(*, key_prefix: str) -> None:
+def _render_example_json_ui(*, key_prefix: str, show_dropdown: bool = True) -> None:
     """
     Show example portfolio JSONs (built-ins + a minimal template) to help users author their own files.
     """
@@ -502,6 +599,18 @@ def _render_example_json_ui(*, key_prefix: str) -> None:
             },
         ]
         minimal_example_obj = {"Name": "My Portfolio", "Assets": minimal_assets, "Value": 80_000.0}
+
+        if not show_dropdown:
+            txt = json.dumps(minimal_example_obj, indent=2)
+            st.code(txt, language="json")
+            st.download_button(
+                "Download (.json)",
+                data=txt.encode("utf-8"),
+                file_name="portfolio_example_minimal.json",
+                mime="application/json",
+                key=f"{key_prefix}_download_example_min",
+            )
+            return
 
         example_options = ["Minimal example (template)"] + [os.path.basename(p) for p in example_paths]
         selected_ex = st.selectbox("Choose an example", options=example_options, key=f"{key_prefix}_example_select")
@@ -594,7 +703,7 @@ def _cached_price_date_ranges(tickers: tuple[str, ...]) -> dict[str, tuple[str |
     out: dict[str, tuple[str | None, str | None]] = {t: (None, None) for t in tickers_list}
 
     try:
-        px = _retry_on_rate_limit(Portfolio.download_prices, list(tickers_list), period="max")
+        px = _get_prices_and_store(tuple(sorted(tickers_list)))
     except Exception:
         return out
 
@@ -621,7 +730,7 @@ def _validate_portfolio_json_obj(obj: dict[str, Any]) -> tuple[bool, list[str]]:
 
     Checks:
     - Template/schema shape
-    - Numeric sanity (weights/targets > 0, sums ~ 100, Value > 0 if provided)
+    - Numeric sanity (weights >= 0, targets > 0, sums ~ 100, Value > 0 if provided)
     - Ticker validity: either in `cache/assets/list.json` OR yfinance has data
     """
     errors: list[str] = []
@@ -672,8 +781,8 @@ def _validate_portfolio_json_obj(obj: dict[str, Any]) -> tuple[bool, list[str]]:
 
         if w is None:
             errors.append(f"Assets[{i}].Weight must be a number.")
-        elif not np.isfinite(w) or w <= 0:
-            errors.append(f"Assets[{i}].Weight must be > 0.")
+        elif not np.isfinite(w) or w < 0:
+            errors.append(f"Assets[{i}].Weight must be >= 0.")
         else:
             weights.append(float(w))
 
@@ -935,7 +1044,7 @@ def _build_portfolio_from_manual(
     weights = data["Weight (%)"].to_list()
     targets = data["Target (%)"].to_list()
 
-    prices = _cached_download_prices(tuple(sorted(tickers)))
+    prices = _get_prices_and_store(tuple(sorted(set(tickers)))) if tickers else pd.DataFrame()
     p = Portfolio(tickers=tickers, weights=weights, assets=assets, prices=prices)
     p.name = str(portfolio_name).strip() or "Portfolio"
     p.current_value_eur = float(value_eur) if value_eur is not None else None
@@ -981,7 +1090,12 @@ def portfolio_builder(
             st.error("No built-in portfolios found in `cache/portfolios/`.")
             return None, None
 
-        path = st.selectbox("Select a portfolio JSON", options=paths, format_func=lambda p: os.path.basename(p), key=f"{key}_builtin")
+        path = st.selectbox(
+            "Select a portfolio JSON",
+            options=paths,
+            format_func=_cached_portfolio_name,
+            key=f"{key}_builtin",
+        )
         try:
             loaded_p = _cached_load_portfolio(path)
             _render_portfolio_preview(loaded_p)
@@ -991,7 +1105,7 @@ def portfolio_builder(
             return None, None
 
     if source == "Upload JSON":
-        _render_example_json_ui(key_prefix=f"{key}_upload")
+        _render_example_json_ui(key_prefix=f"{key}_upload", show_dropdown=False)
 
         up = st.file_uploader("Upload a portfolio JSON", type=["json"], key=f"{key}_upload")
         if up is None:
@@ -1007,8 +1121,7 @@ def portfolio_builder(
             if not ok:
                 raise ValueError("Invalid portfolio JSON:\n- " + "\n- ".join(errs))
 
-            tmp = _safe_temp_json(raw)
-            loaded_p = Portfolio.from_json(tmp)
+            loaded_p = _portfolio_from_json_obj_with_cache(obj, source=up.name)
             _render_portfolio_preview(loaded_p)
             return loaded_p, None
         except Exception as e:
@@ -1525,7 +1638,7 @@ def _rolling_correlation_to_stocks(p: Portfolio, window_days: int = 252) -> pd.D
     # If no stocks in portfolio, download external stocks data
     if not stock_tickers:
         try:
-            stocks_prices = _cached_download_prices((DEFAULT_STOCKS_TICKER,))
+            stocks_prices = _get_prices_and_store((DEFAULT_STOCKS_TICKER,))
             if stocks_prices.empty or DEFAULT_STOCKS_TICKER not in stocks_prices.columns:
                 return pd.DataFrame()
             # Align external stocks with portfolio prices
@@ -1703,9 +1816,7 @@ def _render_drawdown_chart_multi(
     with st.expander("ℹ️ What does this chart show?", expanded=False):
         st.markdown(
             """
-This compares **drawdowns** (peak-to-trough declines) across portfolios.
-
-Lower (more negative) values mean deeper declines from previous highs. Portfolios that recover faster will show shorter “underwater” stretches.
+This compares **drawdowns** (peak-to-trough declines) across portfolios. Lower (more negative) values mean deeper declines from previous highs. Portfolios that recover faster will show shorter “underwater” stretches.
             """
         )
 
@@ -2065,7 +2176,7 @@ if page == "home":
 This app can help you manage your portfolio in 4 ways:
 - Analyze its historical performance and understand correlations between assets.
 - Compare it against other benchmark portfolios.
-- Rebalance it with new cash, by considering deviations from target weights, macroeconomic conditions, trends, transaction costs and fiscal optimizations. An AI will assist you in the process.
+- Rebalance it with new cash, by considering deviations from target weights, macroeconomic conditions, trends, transaction costs and tax optimizations. An AI will assist you in the process.
 - Explore what happens if you add new assets in terms of diversification and risk-adjusted returns. An AI will assist you in the process.
 
 **Who is this app intended for?**
@@ -2101,14 +2212,17 @@ elif page == "analyze":
     with st.expander("ℹ️ About this section", expanded=False):
         st.markdown("""
 This section analyzes a single portfolio's historical performance using backtesting.
+What you'll get:
+- **Key metrics**: Total return, CAGR, volatility, Sharpe/Sortino ratios, ulcer index, max drawdown, longest drawdown period.
+- **Value chart**: How your portfolio would have grown over your selected time period.
+- **Asset trajectories**: Individual performance of each asset in your portfolio, with the possibility of showing specific assets only.
+- **Correlation analysis**: Rolling 1-year correlation of each asset vs. stocks, helping you understand diversification.
+- **Drawdown chart**: A chart showing the portfolio's drawdown over time, helping you understand the risk of your portfolio.
 
-**What you'll get:**
-- **Key metrics**: CAGR, volatility, Sharpe/Sortino ratios, max drawdown, and Ulcer Index
-- **Value chart**: How your portfolio would have grown over your selected time period
-- **Asset trajectories**: Individual performance of each asset in your portfolio
-- **Correlation analysis**: Rolling 1-year correlation of each asset vs. stocks, helping you understand diversification
+How to use: create a portfolio using the sliders, use a default one or load a pre-built one, adjust the backtest settings, then click "Run analysis".
 
-**How to use:** Create a portfolio using the sliders or load a pre-built one, adjust the backtest settings (rebalancing frequency, date range), then click "Run analysis".
+**Disclaimer:** This feature has been implemented for convenience, but there are [much](https://backtes.to/) [better](https://testfol.io/) [alternatives](https://www.portfoliovisualizer.com/) if portfolio analysis
+is your only goal. CACH€ shines in AI-assisted portfolio rebalancing and what-if scenarios.
         """)
     
     p, _ = portfolio_builder(key="analyze", title="Portfolio", allow_value=False)
@@ -2463,13 +2577,17 @@ elif page == "compare":
     with st.expander("ℹ️ About this section", expanded=False):
         st.markdown("""
 This section compares multiple portfolios side-by-side using the same time period and settings.
+What you'll get:
 
-**What you'll get:**
-- **Allocation overview**: A table showing how each portfolio is allocated across assets
-- **Performance comparison**: Key metrics (CAGR, volatility, Sharpe, max drawdown, etc.) for each portfolio
+- **Allocation overview**: A table showing how each portfolio is allocated across assets.
+- **Performance comparison**: Key metrics for each portfolio, such as total return, CAGR, annualized volatility, Sharpe/Sortino ratios, ulcer index, max drawdown and longest drawdown period.
 - **Value chart**: All portfolios on the same chart so you can visually compare growth trajectories
+- **Drawdown chart**: A chart showing the portfolios' drawdowns over time, in order to compare their risk profiles.
 
-**How to use:** Select built-in portfolios, upload your own JSON files, or create manual portfolios using sliders. All portfolios will be compared over their common date range. Adjust settings like rebalancing frequency, then click "Run comparison".
+How to use: Select built-in portfolios, upload your own JSON files, or create manual portfolios using sliders. All portfolios will be compared over their common date range. Adjust settings, then click "Run comparison".
+
+**Disclaimer:** This feature has been implemented for convenience, but there are [much](https://backtes.to/) [better](https://testfol.io/) [alternatives](https://www.portfoliovisualizer.com/) if portfolio analysis
+is your only goal. CACH€ shines in AI-assisted portfolio rebalancing and what-if scenarios.
         """)
     
     st.markdown("### Portfolios to compare")
@@ -2486,7 +2604,7 @@ This section compares multiple portfolios side-by-side using the same time perio
     selected_builtin = st.multiselect(
         "Built-in portfolios",
         options=builtin_paths,
-        format_func=lambda p: os.path.basename(p),
+        format_func=_cached_portfolio_name,
         default=builtin_paths[:2] if len(builtin_paths) >= 2 else [],
         key="compare_builtin",
     )
@@ -2516,8 +2634,7 @@ This section compares multiple portfolios side-by-side using the same time perio
                     st.warning(f"Upload '{up.name}' rejected:\n- " + "\n- ".join(errs))
                     continue
 
-                tmp = _safe_temp_json(raw)
-                p_preview = Portfolio.from_json(tmp)
+                p_preview = _portfolio_from_json_obj_with_cache(obj, source=up.name)
                 _render_portfolio_preview(p_preview)
             except Exception:
                 pass
@@ -2565,8 +2682,7 @@ This section compares multiple portfolios side-by-side using the same time perio
                 if not ok:
                     continue
 
-                tmp = _safe_temp_json(raw)
-                p_temp = Portfolio.from_json(tmp)
+                p_temp = _portfolio_from_json_obj_with_cache(obj, source=up.name)
                 name = getattr(p_temp, "name", None) or up.name
                 all_portfolios.append((str(name), p_temp))
             except Exception:
@@ -3513,7 +3629,7 @@ This section explores what would happen if you added a new asset to your portfol
                     step_start = time.time()
                     tickers_universe = list(getattr(p, "tickers", [])) + [c for c in candidates if c not in getattr(p, "tickers", [])]
                     with st.spinner("Downloading price data..."):
-                        prices_universe = _cached_download_prices(tuple(sorted(tickers_universe)))
+                        prices_universe = _get_prices_and_store(tuple(sorted(tickers_universe)))
 
                     portfolio_tickers = list(getattr(p, "tickers", []))
                     candidate_cols = [c for c in candidates if c in prices_universe.columns]
