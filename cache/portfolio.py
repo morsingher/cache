@@ -245,12 +245,14 @@ class Portfolio:
         ignore_tz: bool = True,
         progress: bool = False,
         threads: bool = True,
+        use_local_db: bool = True,
     ) -> pd.DataFrame:
         """
         Download Close/AdjClose-equivalent prices for tickers as a DataFrame (columns=tickers).
 
         Notes:
-        - Uses yfinance bulk download.
+        - If use_local_db=True (default), tries to load from local parquet store first.
+        - Falls back to yfinance bulk download if local data not available.
         - Special-case: if "DBMF" is requested, we stitch a long EUR history
           (EU listing + synthetic backfill via FX) to avoid a short history.
         """
@@ -261,6 +263,27 @@ class Portfolio:
         tickers_norm = [str(t).strip() for t in tickers if str(t).strip()]
         if not tickers_norm:
             return pd.DataFrame()
+        
+        # Try local data store first (if enabled)
+        if use_local_db:
+            try:
+                from datastore import data_exists, get_prices_for_tickers
+                if data_exists():
+                    local_prices = get_prices_for_tickers(tickers_norm)
+                    if not local_prices.empty:
+                        # Check if we have all requested tickers
+                        available = [t for t in tickers_norm if t in local_prices.columns]
+                        if len(available) == len(tickers_norm):
+                            return local_prices[tickers_norm]
+                        # Partial match - we'll need to fetch missing from API
+                        # Continue to yfinance for the rest
+            except ImportError:
+                # datastore module not available, continue with yfinance
+                pass
+            except Exception:
+                # Any other error, continue with yfinance
+                pass
+        
         # Cache should be order-insensitive to avoid redundant yfinance calls.
         # We still return data in the original order.
         cache_tickers = tuple(sorted(set(tickers_norm)))
@@ -965,7 +988,7 @@ class Portfolio:
             {
                 "Current Weight (%)": np.asarray(wc) * 100.0,
                 "Target Weight (%)": np.asarray(wt) * 100.0,
-                "Cash Allocation (EUR)": delta,
+                "Cash (EUR)": delta,
                 "New Weight (%)": np.asarray(new_w) * 100.0,
             },
             index=labels,

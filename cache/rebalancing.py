@@ -140,8 +140,8 @@ def _try_get_acwi_earnings_yield_est(debug: bool, max_retries: int = 3, base_del
 class MacroSnapshot:
     asof: pd.Timestamp
     ecb_dfr_pct: float | None
-    de_10y_yield_pct: float | None
-    de_cpi_yoy_pct: float | None
+    eu_10y_yield_pct: float | None
+    eu_cpi_yoy_pct: float | None
     fed_rf_pct: float | None
     us_10y_yield_pct: float | None
     us_cpi_yoy_pct: float | None
@@ -302,10 +302,31 @@ def _try_get_fred_series(
     return None
 
 
-def get_macro_snapshot(fred_api_key: str | None = None, debug: bool = False) -> MacroSnapshot | None:
+def get_macro_trends_from_local() -> dict[str, dict[str, float | None]] | None:
+    """
+    Load historical macro trends from local data store.
+    
+    Returns:
+        Dictionary with trend data for each macro indicator (3m/6m/12m ago values),
+        or None if not available.
+    """
+    try:
+        from datastore import load_macro_snapshot
+        snapshot = load_macro_snapshot()
+        if snapshot is not None:
+            return snapshot.get("trends")
+    except Exception:
+        pass
+    return None
+
+
+def get_macro_snapshot(fred_api_key: str | None = None, debug: bool = False, use_local_db: bool = True) -> MacroSnapshot | None:
     """
     Minimal macro snapshot for rebalancing context.
 
+    If use_local_db=True (default), tries to load from local data store first.
+    Falls back to FRED API if local data not available.
+    
     Uses FRED if available and API key is provided (arg or env var FRED_API_KEY).
     Series used (best-effort):
       - ECB deposit facility rate (ECBDFR) (%)
@@ -317,6 +338,33 @@ def get_macro_snapshot(fred_api_key: str | None = None, debug: bool = False) -> 
       - US CPI (CPIAUCSL) (index, monthly) -> YoY inflation (%)
       - Global earnings yield estimate (best-effort, derived from ACWI)
     """
+    # Try local data store first
+    if use_local_db:
+        try:
+            from datastore import data_exists, load_macro_snapshot
+            if data_exists():
+                local_macro = load_macro_snapshot()
+                if local_macro is not None:
+                    return MacroSnapshot(
+                        asof=local_macro.get("asof"),
+                        ecb_dfr_pct=local_macro.get("ecb_dfr_pct"),
+                        eu_10y_yield_pct=local_macro.get("eu_10y_yield_pct"),
+                        eu_cpi_yoy_pct=local_macro.get("eu_cpi_yoy_pct"),
+                        fed_rf_pct=local_macro.get("fed_rf_pct"),
+                        us_10y_yield_pct=local_macro.get("us_10y_yield_pct"),
+                        us_cpi_yoy_pct=local_macro.get("us_cpi_yoy_pct"),
+                        global_earnings_yield_est_pct=local_macro.get("global_earnings_yield_est_pct"),
+                        global_earnings_yield_note=local_macro.get("global_earnings_yield_note"),
+                        usd_eur_spot=local_macro.get("usd_eur_spot"),
+                        usd_eur_3m_ago=local_macro.get("usd_eur_3m_ago"),
+                        usd_eur_6m_ago=local_macro.get("usd_eur_6m_ago"),
+                        usd_eur_12m_ago=local_macro.get("usd_eur_12m_ago"),
+                    )
+        except ImportError:
+            pass  # datastore not available
+        except Exception:
+            pass  # any other error, fall back to FRED
+    
     if Fred is None:
         if debug:
             print("[macro] fredapi not available; skipping macro overlay.")
@@ -333,8 +381,8 @@ def get_macro_snapshot(fred_api_key: str | None = None, debug: bool = False) -> 
     # Pull ~2y to compute YoY inflation reliably and to support 12m trend charts elsewhere.
     obs_start = pd.Timestamp.now() - pd.DateOffset(months=26)
     s_ecb_dfr = _try_get_fred_series(fred, "ECBDFR", debug=debug, observation_start=obs_start)  # %
-    s_de_10y = _try_get_fred_series(fred, "IRLTLT01DEM156N", debug=debug, observation_start=obs_start)  # %
-    s_de_cpi = _try_get_fred_series(fred, "DEUCPIALLMINMEI", debug=debug, observation_start=obs_start)  # index
+    s_eu_10y = _try_get_fred_series(fred, "IRLTLT01DEM156N", debug=debug, observation_start=obs_start)  # % (German Bund as EU proxy)
+    s_eu_cpi = _try_get_fred_series(fred, "CP0000EZ19M086NEST", debug=debug, observation_start=obs_start)  # Euro Area HICP index
     s_usd_eur = _try_get_fred_series(fred, "DEXUSEU", debug=debug, observation_start=obs_start)  # USD per 1 EUR
     s_fed_rf = _try_get_fred_series(fred, "EFFR", debug=debug, observation_start=obs_start)  # %
     s_us_10y = _try_get_fred_series(fred, "DGS10", debug=debug, observation_start=obs_start)  # %
@@ -343,10 +391,10 @@ def get_macro_snapshot(fred_api_key: str | None = None, debug: bool = False) -> 
     cols: dict[str, pd.Series] = {}
     if s_ecb_dfr is not None:
         cols["ecb_dfr_pct"] = pd.to_numeric(s_ecb_dfr, errors="coerce")
-    if s_de_10y is not None:
-        cols["de_10y_yield_pct"] = pd.to_numeric(s_de_10y, errors="coerce")
-    if s_de_cpi is not None:
-        cols["de_cpi_idx"] = pd.to_numeric(s_de_cpi, errors="coerce")
+    if s_eu_10y is not None:
+        cols["eu_10y_yield_pct"] = pd.to_numeric(s_eu_10y, errors="coerce")
+    if s_eu_cpi is not None:
+        cols["eu_cpi_idx"] = pd.to_numeric(s_eu_cpi, errors="coerce")
     if s_usd_eur is not None:
         cols["usd_eur"] = pd.to_numeric(s_usd_eur, errors="coerce")
     if s_fed_rf is not None:
@@ -366,20 +414,20 @@ def get_macro_snapshot(fred_api_key: str | None = None, debug: bool = False) -> 
     asof = pd.Timestamp(df.index.max())
 
     ecb_dfr = float(df["ecb_dfr_pct"].iloc[-1]) if "ecb_dfr_pct" in df.columns else None
-    de_10y = float(df["de_10y_yield_pct"].iloc[-1]) if "de_10y_yield_pct" in df.columns else None
+    eu_10y = float(df["eu_10y_yield_pct"].iloc[-1]) if "eu_10y_yield_pct" in df.columns else None
     fed_rf = float(df["fed_rf_pct"].iloc[-1]) if "fed_rf_pct" in df.columns else None
     us_10y = float(df["us_10y_yield_pct"].iloc[-1]) if "us_10y_yield_pct" in df.columns else None
 
-    de_cpi_yoy = None
+    eu_cpi_yoy = None
     # IMPORTANT: compute CPI YoY on the original CPI series, not on the merged/ffilled dataframe.
     # Otherwise pct_change(12) can accidentally mean "12 days" if the index became daily.
-    if s_de_cpi is not None:
-        cpi = pd.to_numeric(s_de_cpi, errors="coerce").dropna()
+    if s_eu_cpi is not None:
+        cpi = pd.to_numeric(s_eu_cpi, errors="coerce").dropna()
         if cpi.shape[0] >= 13:
             infl_yoy = cpi.pct_change(12) * 100.0  # monthly YoY (%)
             infl_yoy = infl_yoy.dropna()
             if not infl_yoy.empty:
-                de_cpi_yoy = float(infl_yoy.iloc[-1])
+                eu_cpi_yoy = float(infl_yoy.iloc[-1])
 
     us_cpi_yoy = None
     if s_us_cpi is not None:
@@ -431,8 +479,8 @@ def get_macro_snapshot(fred_api_key: str | None = None, debug: bool = False) -> 
     return MacroSnapshot(
         asof=asof,
         ecb_dfr_pct=ecb_dfr,
-        de_10y_yield_pct=de_10y,
-        de_cpi_yoy_pct=de_cpi_yoy,
+        eu_10y_yield_pct=eu_10y,
+        eu_cpi_yoy_pct=eu_cpi_yoy,
         fed_rf_pct=fed_rf,
         us_10y_yield_pct=us_10y,
         us_cpi_yoy_pct=us_cpi_yoy,
@@ -454,10 +502,10 @@ def print_macro_overview(fred_api_key: str | None = None, debug: bool = False) -
     print(f"MACRO OVERVIEW (as of: {snap.asof.date().isoformat()})\n")
     if snap.ecb_dfr_pct is not None:
         print(f"ECB Deposit Facility Rate: {snap.ecb_dfr_pct:.2f}%")
-    if snap.de_10y_yield_pct is not None:
-        print(f"DE 10Y Yield: {snap.de_10y_yield_pct:.2f}%")
-    if snap.de_cpi_yoy_pct is not None:
-        print(f"DE CPI YoY: {snap.de_cpi_yoy_pct:.2f}%")
+    if snap.eu_10y_yield_pct is not None:
+        print(f"EU 10Y Yield: {snap.eu_10y_yield_pct:.2f}%")
+    if snap.eu_cpi_yoy_pct is not None:
+        print(f"EU CPI YoY: {snap.eu_cpi_yoy_pct:.2f}%")
     if snap.usd_eur_spot is not None:
         print(f"USD/EUR: {snap.usd_eur_spot:.4f}")
 
@@ -718,13 +766,13 @@ def build_llm_rebalance_report(
     else:
         macro_lines.append(f"As-of: {macro_snapshot.asof.date().isoformat()}")
         macro_lines.append("")
-        macro_lines.append("EU / DE (levels):")
+        macro_lines.append("EU (levels):")
         if macro_snapshot.ecb_dfr_pct is not None:
             macro_lines.append(f"  ECB deposit rate: {macro_snapshot.ecb_dfr_pct:.2f}%")
-        if macro_snapshot.de_10y_yield_pct is not None:
-            macro_lines.append(f"  DE 10Y yield: {macro_snapshot.de_10y_yield_pct:.2f}%")
-        if macro_snapshot.de_cpi_yoy_pct is not None:
-            macro_lines.append(f"  DE inflation YoY: {macro_snapshot.de_cpi_yoy_pct:.2f}%")
+        if macro_snapshot.eu_10y_yield_pct is not None:
+            macro_lines.append(f"  EU 10Y yield: {macro_snapshot.eu_10y_yield_pct:.2f}%")
+        if macro_snapshot.eu_cpi_yoy_pct is not None:
+            macro_lines.append(f"  EU inflation YoY: {macro_snapshot.eu_cpi_yoy_pct:.2f}%")
         if macro_snapshot.usd_eur_spot is not None:
             macro_lines.append(f"  USD/EUR spot: {macro_snapshot.usd_eur_spot:.4f}")
 
@@ -759,14 +807,14 @@ def build_llm_rebalance_report(
                         vals.append(fmt.format(v))
                 macro_lines.append(f"  {label}: {vals[0]} / {vals[1]} / {vals[2]}")
 
-            _fmt_trend("ecb_deposit_rate_pct", label="ECB deposit rate", fmt="{:.2f}%")
-            _fmt_trend("de_10y_yield_pct", label="DE 10Y yield", fmt="{:.2f}%")
-            _fmt_trend("de_inflation_yoy_pct", label="DE inflation YoY", fmt="{:.2f}%")
+            _fmt_trend("ecb_dfr_pct", label="ECB deposit rate", fmt="{:.2f}%")
+            _fmt_trend("eu_10y_yield_pct", label="EU 10Y yield", fmt="{:.2f}%")
+            _fmt_trend("eu_cpi_yoy_pct", label="EU inflation YoY", fmt="{:.2f}%")
             _fmt_trend("usd_eur", label="USD/EUR", fmt="{:.4f}")
-            _fmt_trend("fed_risk_free_pct", label="Fed risk-free (EFFR)", fmt="{:.2f}%")
+            _fmt_trend("fed_rf_pct", label="Fed risk-free (EFFR)", fmt="{:.2f}%")
             _fmt_trend("us_10y_yield_pct", label="US 10Y yield", fmt="{:.2f}%")
-            _fmt_trend("us_inflation_yoy_pct", label="US inflation YoY", fmt="{:.2f}%")
-            _fmt_trend("global_earnings_yield_est_pct", label="Global earnings yield (est.)", fmt="{:.2f}%")
+            _fmt_trend("us_cpi_yoy_pct", label="US inflation YoY", fmt="{:.2f}%")
+            _fmt_trend("global_ey_pct", label="Global earnings yield (est.)", fmt="{:.2f}%")
 
     diagnostics_explain = (
         "Diagnostics table notes:\n"
@@ -810,7 +858,7 @@ def build_llm_rebalance_report(
         report.append("User preferences are optional, but should be used to guide the allocation decision. "
                       "For example, if the user wants to minimize transaction costs, propose an alternative allocation to account for this. "
                       "Similarly, if the user wants to harvest a tax loss, then you are allowed to sell the assets the user indicates, even if rebalancing should be buy-only. "
-                      "If the user does not specify any asset to use for harvesting, then suggest one but warn the user to check fiscal rules in their country.\n")
+                      "If the user does not specify any asset to use for harvesting, then suggest one but warn the user to check fiscal rules in their country. Here is what the user inserted:\n\n")
         report.append("```\n" + str(user_preferences).strip() + "\n```\n\n")
     report.append("## Macro-economic snapshot\n\n")
     report.append("```\n" + "\n".join(macro_lines) + "\n```\n\n")

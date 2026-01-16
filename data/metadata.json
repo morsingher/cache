@@ -1,0 +1,169 @@
+{
+  "updated_at": "2026-01-16T16:22:41.102515",
+  "tickers": [
+    "ACWE.MI",
+    "AGGH.MI",
+    "BTC-EUR",
+    "CCUSAS.MI",
+    "CMOD.MI",
+    "DBMF",
+    "EHYA.MI",
+    "EPRA.MI",
+    "ETH-EUR",
+    "GGRA.MI",
+    "IBCI.MI",
+    "INFL.MI",
+    "IUSN.DE",
+    "IWMO.MI",
+    "IWQU.MI",
+    "IWVL.MI",
+    "JPGL.MI",
+    "MVOL.MI",
+    "SGLD.MI",
+    "SOL-EUR",
+    "UEQC.DE",
+    "VGEA.MI",
+    "XAD6.MI",
+    "XEON.MI",
+    "XRP-EUR",
+    "ZPRVX"
+  ],
+  "total_rows": 5844,
+  "date_range": {
+    "start": "2008-01-02",
+    "end": "2026-01-16"
+  },
+  "ticker_ranges": {
+    "ACWE.MI": {
+      "start": "2019-01-30",
+      "end": "2026-01-16",
+      "count": 1767
+    },
+    "AGGH.MI": {
+      "start": "2019-06-12",
+      "end": "2026-01-16",
+      "count": 1675
+    },
+    "BTC-EUR": {
+      "start": "2014-09-17",
+      "end": "2026-01-16",
+      "count": 4140
+    },
+    "CCUSAS.MI": {
+      "start": "2015-04-14",
+      "end": "2026-01-16",
+      "count": 2426
+    },
+    "CMOD.MI": {
+      "start": "2017-01-09",
+      "end": "2026-01-16",
+      "count": 2283
+    },
+    "DBMF": {
+      "start": "2019-05-08",
+      "end": "2026-01-16",
+      "count": 1684
+    },
+    "EHYA.MI": {
+      "start": "2021-06-03",
+      "end": "2026-01-16",
+      "count": 1162
+    },
+    "EPRA.MI": {
+      "start": "2017-04-18",
+      "end": "2026-01-16",
+      "count": 2177
+    },
+    "ETH-EUR": {
+      "start": "2017-11-11",
+      "end": "2026-01-16",
+      "count": 2989
+    },
+    "GGRA.MI": {
+      "start": "2016-06-03",
+      "end": "2026-01-16",
+      "count": 2440
+    },
+    "IBCI.MI": {
+      "start": "2008-01-02",
+      "end": "2026-01-16",
+      "count": 4580
+    },
+    "INFL.MI": {
+      "start": "2017-09-12",
+      "end": "2026-01-16",
+      "count": 2115
+    },
+    "IUSN.DE": {
+      "start": "2018-04-26",
+      "end": "2026-01-16",
+      "count": 1960
+    },
+    "IWMO.MI": {
+      "start": "2015-02-17",
+      "end": "2026-01-16",
+      "count": 2587
+    },
+    "IWQU.MI": {
+      "start": "2015-02-19",
+      "end": "2026-01-16",
+      "count": 2533
+    },
+    "IWVL.MI": {
+      "start": "2015-02-20",
+      "end": "2026-01-16",
+      "count": 2577
+    },
+    "JPGL.MI": {
+      "start": "2019-07-17",
+      "end": "2026-01-16",
+      "count": 1650
+    },
+    "MVOL.MI": {
+      "start": "2015-02-17",
+      "end": "2026-01-16",
+      "count": 2711
+    },
+    "SGLD.MI": {
+      "start": "2014-11-28",
+      "end": "2026-01-16",
+      "count": 2795
+    },
+    "SOL-EUR": {
+      "start": "2020-04-10",
+      "end": "2026-01-16",
+      "count": 2108
+    },
+    "UEQC.DE": {
+      "start": "2020-01-16",
+      "end": "2026-01-16",
+      "count": 1527
+    },
+    "VGEA.MI": {
+      "start": "2020-01-14",
+      "end": "2026-01-16",
+      "count": 1527
+    },
+    "XAD6.MI": {
+      "start": "2010-11-19",
+      "end": "2026-01-16",
+      "count": 3353
+    },
+    "XEON.MI": {
+      "start": "2008-01-02",
+      "end": "2026-01-16",
+      "count": 4580
+    },
+    "XRP-EUR": {
+      "start": "2017-11-11",
+      "end": "2026-01-16",
+      "count": 2989
+    },
+    "ZPRVX": {
+      "start": "2015-02-18",
+      "end": "2026-01-16",
+      "count": 2771
+    }
+  },
+  "macro_available": true
+}
