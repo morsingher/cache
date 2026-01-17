@@ -258,7 +258,7 @@ def render_rolling_volatility_chart(
         st.markdown(f"#### {title}")
 
     if color:
-        chart = alt.Chart(df).mark_line(strokeWidth=2.0, color=color)
+        chart = alt.Chart(df).mark_line(strokeWidth=3.0, color=color)
     else:
         chart = alt.Chart(df).mark_line(strokeWidth=3.0)
 
@@ -346,7 +346,7 @@ def render_macro_chart(
         
     chart = (
         alt.Chart(dfc)
-        .mark_line(strokeWidth=2.0)
+        .mark_line(strokeWidth=3.0)
         .encode(
             x=alt.X("Date:T", title="Date", axis=alt.Axis(format="%m/%Y")),
             y=alt.Y("Value:Q", title=y_title),

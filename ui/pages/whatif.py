@@ -280,6 +280,8 @@ How to use: define your baseline portfolio by either manually creating it, selec
 
                     scores_transposed = None
                     llm_scores_df = None
+                    candidate_order = [candidate_name_map.get(c, c) for c in candidates]
+                    candidate_order = sorted(dict.fromkeys(candidate_order))
                     if not scores.empty:
                         scores_display = scores.copy()
                         scores_display.index = [candidate_name_map.get(t, t) for t in scores_display.index]
@@ -301,12 +303,14 @@ How to use: define your baseline portfolio by either manually creating it, selec
                             "max_abs_corr_offender": "Highest Corr Asset",
                             "w_mean_abs_corr_to_assets": "Weighted Avg |Corr|",
                             "corr_to_portfolio": "Corr to Portfolio",
-                            "delta_vol_if_swap": "Δ Volatility (swap)",
-                            "delta_max_drawdown_if_swap": "Δ |Max Drawdown| (swap)",
+                            "delta_vol_if_swap": "Δ Volatility (%)",
+                            "delta_max_drawdown_if_swap": "Δ |Max Drawdown| (%)",
                             "cand_vol_ann": "Candidate Vol (ann.)",
                             "n_months_used": "Months of Data",
                         })
                         scores_transposed = scores_display.T
+                        # Ensure stable candidate ordering across tables
+                        scores_transposed = scores_transposed.reindex(columns=[c for c in candidate_order if c in scores_transposed.columns])
                         llm_scores_df = scores_transposed
 
                     timed_step(step_ph, "Computing diversification scores...", step_start)
@@ -368,6 +372,7 @@ How to use: define your baseline portfolio by either manually creating it, selec
                             if rrr_rows:
                                 rrr_df = pd.DataFrame(rrr_rows).set_index("Candidate")
                                 rrr_transposed = rrr_df.T
+                                rrr_transposed = rrr_transposed.reindex(columns=[c for c in candidate_order if c in rrr_transposed.columns])
                                 llm_rrr_df = rrr_transposed
                     except Exception as e:
                         rrr_error = str(e)
@@ -410,10 +415,30 @@ How to use: define your baseline portfolio by either manually creating it, selec
                             value_series_dict[portfolio_label] = v
 
                         backtest_results_df = pd.DataFrame(rows).set_index("Portfolio")
+                        ordered_index = ["Baseline"] + [f"+ {c}" for c in candidate_order if f"+ {c}" in backtest_results_df.index]
+                        backtest_results_df = backtest_results_df.reindex(index=ordered_index)
                         # Format for LLM
                         llm_backtest_df = backtest_results_df.copy()
                         # Clean up numeric columns for display later if needed, but LLM needs raw or formatted string
                         backtest_df = backtest_results_df # Store raw for now
+
+                        # Align diversification deltas with backtest metrics (same methodology/window).
+                        if scores_transposed is not None and "Baseline" in backtest_df.index:
+                            base_vol = float(backtest_df.loc["Baseline", "vol_annual"])
+                            base_mdd = float(backtest_df.loc["Baseline", "max_drawdown"])
+                            for cand_name in candidate_order:
+                                label = f"+ {cand_name}"
+                                if label not in backtest_df.index:
+                                    continue
+                                cand_vol = float(backtest_df.loc[label, "vol_annual"])
+                                cand_mdd = float(backtest_df.loc[label, "max_drawdown"])
+                                delta_vol = cand_vol - base_vol
+                                delta_mdd = abs(cand_mdd) - abs(base_mdd)
+                                if "Δ Volatility (%)" in scores_transposed.index and cand_name in scores_transposed.columns:
+                                    scores_transposed.loc["Δ Volatility (%)", cand_name] = delta_vol
+                                if "Δ |Max Drawdown| (%)" in scores_transposed.index and cand_name in scores_transposed.columns:
+                                    scores_transposed.loc["Δ |Max Drawdown| (%)", cand_name] = delta_mdd
+                            llm_scores_df = scores_transposed
 
                     timed_step(step_ph, "Running backtests...", step_start)
                     step_ph = st.empty()
@@ -474,10 +499,21 @@ How to use: define your baseline portfolio by either manually creating it, selec
                 st.markdown("### Diversification Analysis")
                 # Round numeric values to 2 decimal places
                 scores_display = results["scores_transposed"].copy()
-                for col in scores_display.columns:
-                    scores_display[col] = scores_display[col].apply(
-                        lambda x: f"{float(x):.2f}" if isinstance(x, (int, float)) and pd.notna(x) else (str(int(x)) if isinstance(x, float) and x == int(x) else str(x))
-                    )
+                pct_rows = {
+                    "Δ Volatility (%)",
+                    "Δ |Max Drawdown| (%)",
+                    "Candidate Vol (ann.)",
+                }
+                def _fmt_cell(x, row_name):
+                    if isinstance(x, (int, float)) and pd.notna(x):
+                        if row_name in pct_rows:
+                            return f"{float(x) * 100:.2f}%"
+                        return f"{float(x):.2f}"
+                    if isinstance(x, float) and x == int(x):
+                        return str(int(x))
+                    return str(x)
+
+                scores_display = scores_display.apply(lambda row: row.map(lambda x: _fmt_cell(x, row.name)), axis=1)
                 st.dataframe(scores_display, width="stretch")
                 
                 with st.expander("ℹ️ How to read this?", expanded=False):
@@ -494,9 +530,9 @@ This table shows how well each candidate asset would diversify your portfolio. L
 
 **Corr to Portfolio** — Correlation to overall portfolio returns. Lower values mean the candidate provides more diversification at the portfolio level.
 
-**Δ Volatility (swap)** — Projected change in portfolio volatility if you add this candidate. Negative values indicate the swap would reduce overall portfolio risk.
+**Δ Volatility (%)** — Projected change in portfolio volatility if you add this candidate. Negative values indicate the swap would reduce overall portfolio risk.
 
-**Δ |Max Drawdown| (swap)** — Projected change in maximum drawdown magnitude. Negative values mean smaller worst-case losses.
+**Δ |Max Drawdown| (%)** — Projected change in maximum drawdown magnitude. Negative values mean smaller worst-case losses.
 
 **Candidate Vol (ann.)** — The candidate's own annualized volatility. Higher values indicate more price swings.
 
@@ -509,6 +545,7 @@ This table shows how well each candidate asset would diversify your portfolio. L
                 with st.expander("ℹ️ How to read this?", expanded=False):
                     st.markdown("""
 This analysis uses the Return-to-Risk Ratio (RRR = Annualized Return / Annualized Volatility) to determine if adding a candidate asset would improve your portfolio's risk-adjusted performance.
+Note: RRR here is computed from monthly simple returns and then annualized (12 periods/year).
 
 **Portfolio RRR** — Your current portfolio's return-to-risk ratio. This is the benchmark to beat.
 
@@ -541,7 +578,7 @@ All the credits to [Bridge Alternatives](https://www.bridgealternatives.com/insi
                 pct_cols = ["total_return", "cagr", "vol_annual", "max_drawdown"]
                 for c in pct_cols:
                     if c in bt_df.columns:
-                        bt_df[c] = bt_df[c].apply(lambda x: f"{float(x)*100:.2f}" if pd.notna(x) else "—")
+                        bt_df[c] = bt_df[c].apply(lambda x: f"{float(x)*100:.2f}%" if pd.notna(x) else "—")
                 
                 # Format other numeric columns to 2 decimals
                 for c in ["sharpe", "sortino", "ulcer_index", "max_gain"]:
@@ -572,6 +609,7 @@ This table shows historical backtest results comparing your baseline portfolio a
 **CAGR (%)** — Compound Annual Growth Rate. The smoothed annual return that would produce the same total return.
 
 **Vol (ann.) (%)** — Annualized volatility (standard deviation of returns). Lower values indicate smoother performance.
+Note: Volatility, Sharpe, and Sortino are computed from daily log returns and annualized using 252 trading days.
 
 **Sharpe** — Risk-adjusted return: (Return - Risk-Free Rate) / Volatility. Higher is better.
 

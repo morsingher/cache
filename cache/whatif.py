@@ -358,7 +358,8 @@ def diversification_scores(
             new_port = base_al - float(replace_weight) * from_al + float(replace_weight) * cand_al
             base_vol = float(base_al.std(ddof=1))
             new_vol = float(new_port.std(ddof=1))
-            delta_vol = new_vol - base_vol
+            # Annualize monthly volatility change to align with "Vol (ann.)" elsewhere.
+            delta_vol = (new_vol - base_vol) * _np.sqrt(12.0)
             base_mdd = _max_drawdown_from_simple_returns(base_al)
             new_mdd = _max_drawdown_from_simple_returns(new_port)
             # Use delta of absolute values: negative = improvement (lower drawdown)
@@ -517,14 +518,19 @@ def _print_backtest_table(
     print(f"Common backtest window (all assets): {start.date()} -> {end.date()}")
 
     # Now fill to a daily calendar INSIDE the strict common window only.
-    universe = Portfolio.fill_non_trading_days(raw.loc[start:end], freq="D")
+    # Use the filled series for backtest mechanics, but compute stats on trading-day prices
+    # to avoid artificial zero-returns from weekends/holidays.
+    raw_window = raw.loc[start:end].copy()
+    universe = Portfolio.fill_non_trading_days(raw_window, freq="D")
 
     rows: list[dict] = []
 
     # Baseline
     px_base = universe[portfolio_tickers]
-    v_base = Portfolio.backtest_value_series(px_base, base_weights, rebalance_frequency=rebalance_frequency, initial_value=1.0)
-    stats = Portfolio.backtest_stats(v_base, rf_annual=float(rf_annual))
+    _ = Portfolio.backtest_value_series(px_base, base_weights, rebalance_frequency=rebalance_frequency, initial_value=1.0)
+    px_base_td = raw_window[portfolio_tickers]
+    v_base_td = Portfolio.backtest_value_series(px_base_td, base_weights, rebalance_frequency=rebalance_frequency, initial_value=1.0)
+    stats = Portfolio.backtest_stats(v_base_td, rf_annual=float(rf_annual))
     rows.append({"Portfolio": "Baseline (Target weights)", **stats})
 
     # Candidates
@@ -532,8 +538,10 @@ def _print_backtest_table(
         w = cand_weights[c]
         cols = portfolio_tickers + [c]
         px = universe[cols]
-        v = Portfolio.backtest_value_series(px, w, rebalance_frequency=rebalance_frequency, initial_value=1.0)
-        s = Portfolio.backtest_stats(v, rf_annual=float(rf_annual))
+        _ = Portfolio.backtest_value_series(px, w, rebalance_frequency=rebalance_frequency, initial_value=1.0)
+        px_td = raw_window[cols]
+        v_td = Portfolio.backtest_value_series(px_td, w, rebalance_frequency=rebalance_frequency, initial_value=1.0)
+        s = Portfolio.backtest_stats(v_td, rf_annual=float(rf_annual))
         rows.append({"Portfolio": f"Target + {c} (funded from Stocks)", **s})
 
     df = pd.DataFrame(rows).set_index("Portfolio")

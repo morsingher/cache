@@ -580,7 +580,9 @@ class Portfolio:
         if freq not in freq_map:
             raise ValueError("rebalance_frequency must be one of: monthly, quarterly, annually")
 
-        rebalance_dates = set(px.resample(freq_map[freq]).last().index)
+        rebalance_dates = set(
+            pd.Series(px.index, index=px.index).resample(freq_map[freq]).last().dropna()
+        )
         if px.index[0] in rebalance_dates:
             rebalance_dates.remove(px.index[0])
 
@@ -1257,7 +1259,9 @@ class Portfolio:
         if freq not in freq_map:
             raise ValueError("rebalance_frequency must be one of: monthly, quarterly, annually")
 
-        rebalance_dates = set(prices_df.resample(freq_map[freq]).last().index)
+        rebalance_dates = set(
+            pd.Series(prices_df.index, index=prices_df.index).resample(freq_map[freq]).last().dropna()
+        )
         # Avoid an immediate rebalance on the first day.
         if prices_df.index[0] in rebalance_dates:
             rebalance_dates.remove(prices_df.index[0])

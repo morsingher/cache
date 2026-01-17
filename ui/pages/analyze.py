@@ -231,6 +231,8 @@ is your only goal. CACH€ shines in AI-assisted portfolio rebalancing and what-
 **Ulcer Index** — Measures both depth and duration of drawdowns. Lower is better; it penalizes prolonged declines more than brief ones.
 
 **Sortino Ratio** — Like Sharpe, but only penalizes downside volatility. Higher is better; useful when returns are asymmetric.
+
+Note: Volatility, Sharpe, and Sortino here are computed from daily log returns and annualized using 252 trading days.
                     """
                 )
 
@@ -351,6 +353,8 @@ This shows the **individual growth trajectories** of each asset in your portfoli
                         # Try to map column to short name
                         short_name = full_to_short.get(col, col)
                         for date, val in rolling[col].items():
+                            if pd.isna(val):
+                                continue
                             roll_data.append({"Date": date, "Asset": short_name, "Correlation": float(val)})
                     
                     roll_df = pd.DataFrame(roll_data)

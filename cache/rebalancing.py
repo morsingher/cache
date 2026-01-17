@@ -658,7 +658,7 @@ def compute_rebalancing_diagnostics(
         use_external_stocks = True
         try:
             # Get external stocks prices aligned with portfolio date range
-            ext_prices = external_stocks_prices.reindex(prices_lookback.index).ffill().bfill()
+            ext_prices = external_stocks_prices.reindex(prices_lookback.index).ffill()
             monthly_ext = ext_prices.resample("ME").last().dropna()
             monthly_prices = prices_lookback.resample("ME").last().dropna(how="any")
             if monthly_ext.shape[0] >= 13 and monthly_prices.shape[0] >= 13:
@@ -673,9 +673,6 @@ def compute_rebalancing_diagnostics(
         r_m = r_m.tail(12)
         stocks_bench_m = stocks_bench_m.reindex(r_m.index)
         for t in tickers:
-            if not use_external_stocks and str(assets_map.get(t, "")).lower() == "stocks":
-                corr_12m_monthly[t] = 1.0
-                continue
             if t not in r_m.columns:
                 continue
             pair = pd.DataFrame({"Stocks": stocks_bench_m, "X": r_m[t]}).dropna()
