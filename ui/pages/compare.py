@@ -29,7 +29,12 @@ from ui.portfolio_builder import (
 )
 from ui.components import backtest_controls, timed_step
 from ui.assets import validate_portfolio_json_obj, get_short_name_map
-from ui.charts import render_portfolio_value_chart, render_drawdown_chart
+from ui.charts import (
+    render_portfolio_value_chart, 
+    render_drawdown_chart,
+    render_rolling_return_chart,
+    render_rolling_volatility_chart
+)
 
 def _fmt_days(x: float) -> str:
     try:
@@ -433,5 +438,15 @@ This shows the **growth of each portfolio's value** over time, starting from a n
         render_drawdown_chart(
             value_series,
             title="Drawdown Comparison",
+            portfolio_order=sorted_portfolios
+        )
+
+        render_rolling_return_chart(
+            value_series,
+            portfolio_order=sorted_portfolios
+        )
+
+        render_rolling_volatility_chart(
+            value_series,
             portfolio_order=sorted_portfolios
         )

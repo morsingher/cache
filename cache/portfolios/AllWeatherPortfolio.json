@@ -1,0 +1,41 @@
+{
+    "Name": "All Weather Portfolio",
+    "Assets": [
+        {
+            "Name": "Stocks",
+            "Ticker": "ACWE.MI",
+            "Short": "Stocks",
+            "Weight": 19.0,
+            "Target": 20.0
+        },
+        {
+            "Name": "Bonds EUR Short",
+            "Ticker": "EM13.MI",
+            "Short": "Bonds 1-3Y",
+            "Weight": 22.0,
+            "Target": 20.0
+        },
+        {
+            "Name": "Bonds EUR Long",
+            "Ticker": "EM15.MI",
+            "Short": "Bonds 15Y+",
+            "Weight": 17.0,
+            "Target": 20.0
+        },
+        {
+            "Name": "Gold",
+            "Ticker": "SGLD.MI",
+            "Short": "Gold",
+            "Weight": 18.0,
+            "Target": 20.0
+        },
+        {
+            "Name": "Stocks Small Cap",
+            "Ticker": "IUSN.DE",
+            "Short": "Small Cap",
+            "Weight": 24.0,
+            "Target": 20.0
+        }
+    ],
+    "Value": 100000.00
+}

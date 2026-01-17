@@ -1,6 +1,7 @@
 import altair as alt
 import pandas as pd
 import streamlit as st
+import numpy as np
 
 def _drawdown_series(value: pd.Series) -> pd.Series:
     if value is None or value.empty:
@@ -120,6 +121,176 @@ def render_drawdown_chart(
 This compares **drawdowns** (peak-to-trough declines) across portfolios. Lower (more negative) values mean deeper declines from previous highs. Portfolios that recover faster will show shorter “underwater” stretches.
             """
         )
+
+def render_rolling_return_chart(
+    value_series_by_name: dict[str, pd.Series],
+    *,
+    window_days: int = 252,
+    title: str = "Rolling 12M Returns",
+    height: int = 320,
+    portfolio_order: list[str] | None = None,
+    color: str | None = None,
+    explainer_md: str | None = None,
+) -> None:
+    rows: list[dict[str, object]] = []
+    if value_series_by_name is None:
+        value_series_by_name = {}
+    items: list[tuple[str, pd.Series]] = list(value_series_by_name.items())
+
+    if portfolio_order:
+        ordered: list[tuple[str, pd.Series]] = []
+        seen: set[str] = set()
+        for k in portfolio_order:
+            if k in value_series_by_name:
+                ordered.append((k, value_series_by_name[k]))
+                seen.add(k)
+        for k, v in items:
+            if k not in seen:
+                ordered.append((k, v))
+        items = ordered
+
+    for name, v in items:
+        # pct_change(252) approximates 12-month return for daily data
+        rr = v.pct_change(periods=window_days)
+        if rr.empty:
+            continue
+        rr_pct = rr * 100.0
+        # Drop initial NaNs
+        rr_pct = rr_pct.dropna()
+        for dt, val in rr_pct.items():
+            rows.append({"Date": dt, "Portfolio": str(name), "Return (%)": float(val)})
+
+    if not rows:
+        st.info("Rolling returns unavailable (insufficient history).")
+        return
+
+    df = pd.DataFrame(rows)
+
+    if title:
+        st.markdown(f"#### {title}")
+
+    if color:
+        chart = alt.Chart(df).mark_line(strokeWidth=2.0, color=color)
+    else:
+        chart = alt.Chart(df).mark_line(strokeWidth=2.0)
+
+    encode_kwargs = {
+        "x": alt.X(
+            "Date:T",
+            title="Date",
+            axis=alt.Axis(format="%m/%Y", labelPadding=6, titlePadding=10),
+        ),
+        "y": alt.Y("Return (%):Q", title="Rolling Return (%)"),
+        "tooltip": [
+            alt.Tooltip("Date:T", title="Date"),
+            alt.Tooltip("Portfolio:N", title="Name"),
+            alt.Tooltip("Return (%):Q", title="Return", format=".2f"),
+        ],
+    }
+
+    if not color:
+        color_kwargs = {"title": None}
+        if portfolio_order:
+            color_kwargs["sort"] = portfolio_order
+        encode_kwargs["color"] = alt.Color("Portfolio:N", **color_kwargs)
+
+    chart = chart.encode(**encode_kwargs)
+
+    zero = alt.Chart(pd.DataFrame({"y": [0.0]})).mark_rule(color="#bbbbbb", strokeDash=[4, 4]).encode(y="y:Q")
+    layered = (
+        alt.layer(chart, zero)
+        .properties(height=height, padding={"bottom": 20})
+        .interactive()
+    )
+    st.altair_chart(layered, width="stretch")
+
+    default_explainer = """
+This shows the **rolling 12-month return** for each portfolio. Each point on the line represents the total return over the preceding 12 months.
+    """
+    with st.expander("ℹ️ What does this chart show?", expanded=False):
+        st.markdown(explainer_md if explainer_md else default_explainer)
+
+def render_rolling_volatility_chart(
+    value_series_by_name: dict[str, pd.Series],
+    *,
+    window_days: int = 252,
+    title: str = "Rolling 12M Volatility",
+    height: int = 320,
+    portfolio_order: list[str] | None = None,
+    color: str | None = None,
+    explainer_md: str | None = None,
+) -> None:
+    rows: list[dict[str, object]] = []
+    if value_series_by_name is None:
+        value_series_by_name = {}
+    items: list[tuple[str, pd.Series]] = list(value_series_by_name.items())
+
+    if portfolio_order:
+        ordered: list[tuple[str, pd.Series]] = []
+        seen: set[str] = set()
+        for k in portfolio_order:
+            if k in value_series_by_name:
+                ordered.append((k, value_series_by_name[k]))
+                seen.add(k)
+        for k, v in items:
+            if k not in seen:
+                ordered.append((k, v))
+        items = ordered
+
+    for name, v in items:
+        # Rolling annualized volatility
+        r = np.log(v / v.shift(1))
+        vol = r.rolling(window=window_days).std() * np.sqrt(252)
+        if vol.empty:
+            continue
+        vol_pct = vol * 100.0
+        vol_pct = vol_pct.dropna()
+        for dt, val in vol_pct.items():
+            rows.append({"Date": dt, "Portfolio": str(name), "Volatility (%)": float(val)})
+
+    if not rows:
+        st.info("Rolling volatility unavailable (insufficient history).")
+        return
+
+    df = pd.DataFrame(rows)
+
+    if title:
+        st.markdown(f"#### {title}")
+
+    if color:
+        chart = alt.Chart(df).mark_line(strokeWidth=2.0, color=color)
+    else:
+        chart = alt.Chart(df).mark_line(strokeWidth=3.0)
+
+    encode_kwargs = {
+        "x": alt.X(
+            "Date:T",
+            title="Date",
+            axis=alt.Axis(format="%m/%Y", labelPadding=6, titlePadding=10),
+        ),
+        "y": alt.Y("Volatility (%):Q", title="Rolling Volatility (%)"),
+        "tooltip": [
+            alt.Tooltip("Date:T", title="Date"),
+            alt.Tooltip("Portfolio:N", title="Name"),
+            alt.Tooltip("Volatility (%):Q", title="Volatility", format=".2f"),
+        ],
+    }
+
+    if not color:
+        color_kwargs = {"title": None}
+        if portfolio_order:
+            color_kwargs["sort"] = portfolio_order
+        encode_kwargs["color"] = alt.Color("Portfolio:N", **color_kwargs)
+
+    chart = chart.encode(**encode_kwargs)
+
+    st.altair_chart(chart.properties(height=height, padding={"bottom": 20}).interactive(), width="stretch")
+
+    default_explainer = """
+This shows the **rolling 12-month annualized volatility** for each portfolio. Higher values indicate periods where the portfolio experienced larger daily price swings.
+    """
+    with st.expander("ℹ️ What does this chart show?", expanded=False):
+        st.markdown(explainer_md if explainer_md else default_explainer)
 
 def render_deviation_chart(deviation_data: pd.DataFrame) -> None:
     st.markdown("#### Deviation from Target")

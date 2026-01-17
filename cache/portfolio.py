@@ -776,6 +776,28 @@ class Portfolio:
         }
 
     @staticmethod
+    def rolling_return_series(value: pd.Series, window_trading_days: int = 252) -> pd.Series:
+        """
+        Compute rolling returns over a specified window (default 252 trading days ≈ 12 months).
+        """
+        if value is None or value.empty:
+            return pd.Series(dtype=float)
+        v = pd.to_numeric(value, errors="coerce").dropna()
+        return v.pct_change(periods=window_trading_days)
+
+    @staticmethod
+    def rolling_volatility_series(value: pd.Series, window_trading_days: int = 252) -> pd.Series:
+        """
+        Compute rolling annualized volatility over a specified window (default 252 trading days).
+        """
+        if value is None or value.empty:
+            return pd.Series(dtype=float)
+        v = pd.to_numeric(value, errors="coerce").dropna()
+        r = np.log(v / v.shift(1))
+        # Annualize by sqrt(252) assuming daily data
+        return r.rolling(window=window_trading_days).std() * np.sqrt(252.0)
+
+    @staticmethod
     def annualize_mean_std(returns: pd.Series, *, periods_per_year: int) -> tuple[float, float]:
         """
         Annualize mean and standard deviation from a periodic return series.

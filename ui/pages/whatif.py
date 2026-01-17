@@ -38,7 +38,12 @@ from ui.assets import (
     get_short_name_map,
 )
 from ui.components import timed_step, render_llm_query_ui, backtest_controls
-from ui.charts import render_portfolio_value_chart, render_drawdown_chart
+from ui.charts import (
+    render_portfolio_value_chart, 
+    render_drawdown_chart,
+    render_rolling_return_chart, 
+    render_rolling_volatility_chart
+)
 
 def _fmt_days(x: float) -> str:
     try:
@@ -605,6 +610,15 @@ The **Baseline** line shows your original portfolio. Other lines show how the po
                         """)
                     
                     render_drawdown_chart(value_series, title="Drawdown Comparison", portfolio_order=portfolio_order)
+
+                    render_rolling_return_chart(
+                        value_series,
+                        portfolio_order=portfolio_order
+                    )
+                    render_rolling_volatility_chart(
+                        value_series,
+                        portfolio_order=portfolio_order
+                    )
 
             if results["llm_prompt"]:
                 st.markdown("### AI Assistant")

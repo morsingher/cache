@@ -184,6 +184,27 @@
             "Short": "Comm. Mix",
             "Description": "Tracks the UBS CMCI Composite Index, offering broad commodity exposure with constant maturity to manage roll yield risks.",
             "Link": "https://www.justetf.com/en/etf-profile.html?isin=IE00B53H0131"
+        },
+        {
+            "Name": "Bonds EUR Short",
+            "Ticker": "EM13.MI",
+            "Short": "Bonds 1-3Y",
+            "Description": "Tracks the Bloomberg Euro Treasury 50bn 1-3 Year Bond index, offering exposure to Euro-denominated government bonds with maturities between 1 and 3 years.",
+            "Link": "https://www.justetf.com/en/etf-profile.html?isin=LU1650487413"
+        },
+        {
+            "Name": "Bonds EUR Mid",
+            "Ticker": "EM710.MI",
+            "Short": "Bonds 7-10Y",
+            "Description": "Tracks the Bloomberg Euro Treasury 50bn 7-10 Year Bond index, offering exposure to Euro-denominated government bonds with maturities between 7 and 10 years.",
+            "Link": "https://www.justetf.com/en/etf-profile.html?isin=LU1287023185"
+        },
+        {
+            "Name": "Bonds EUR Long",
+            "Ticker": "EM15.MI",
+            "Short": "Bonds 15Y+",
+            "Description": "Tracks the Bloomberg Euro Treasury 50bn 15+ Year Bond index, offering exposure to Euro-denominated government bonds with maturities beyond 15 years.",
+            "Link": "http://justetf.com/en/etf-profile.html?isin=LU1287023268"
         }
     ]
 }

@@ -4,13 +4,13 @@
   "eu_10y_yield_pct": 2.81421052631579,
   "eu_cpi_yoy_pct": 2.1172381102859683,
   "fed_rf_pct": 3.64,
-  "us_10y_yield_pct": 4.15,
+  "us_10y_yield_pct": 4.17,
   "us_cpi_yoy_pct": 3.0276600652869634,
   "usd_eur_spot": 1.1634,
   "usd_eur_3m_ago": 1.1559,
   "usd_eur_6m_ago": 1.1707,
   "usd_eur_12m_ago": 1.0298,
-  "global_earnings_yield_est_pct": 4.231714000483889,
+  "global_earnings_yield_est_pct": 4.229087469074269,
   "global_earnings_yield_note": null,
   "trends": {
     "ecb_dfr_pct": {
@@ -29,9 +29,9 @@
       "12m": 4.33
     },
     "us_10y_yield_pct": {
-      "3m": 4.03,
-      "6m": 4.43,
-      "12m": 4.78
+      "3m": 4.05,
+      "6m": 4.5,
+      "12m": 4.66
     },
     "usd_eur": {
       "3m": 1.1559,
@@ -39,9 +39,9 @@
       "12m": 1.0298
     },
     "global_ey_pct": {
-      "3m": 4.374551757633008,
-      "6m": 4.759967525003719,
-      "12m": 5.143848928511226
+      "3m": 4.374551698484449,
+      "6m": 4.7599674606439315,
+      "12m": 5.143848858960957
     }
   }
 }

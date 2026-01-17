@@ -17,7 +17,12 @@ except ImportError:
 
 from ui.portfolio_builder import render_portfolio_builder
 from ui.components import backtest_controls, timed_step
-from ui.charts import render_portfolio_value_chart, render_drawdown_chart
+from ui.charts import (
+    render_portfolio_value_chart, 
+    render_drawdown_chart, 
+    render_rolling_return_chart, 
+    render_rolling_volatility_chart
+)
 from ui.assets import get_short_name_map, get_data_status, load_available_assets
 
 def _fmt_days(x: float) -> str:
@@ -401,3 +406,21 @@ This shows **rolling 12-month correlation** of each non-stock asset vs. stocks. 
 This shows **drawdowns** (peak-to-trough declines) of your portfolio over time. Lower (more negative) values mean deeper declines from previous highs. The portfolio recovers when the line returns to 0%.
                         """
                     )
+
+                # Rolling Returns & Volatility
+                render_rolling_return_chart(
+                    {"Portfolio": v_series},
+                    portfolio_order=["Portfolio"],
+                    color=PORTFOLIO_COLOR,
+                    explainer_md="""
+This shows the **rolling 12-month return** for your portfolio. Each point on the line represents the total return over the preceding 12 months.
+                    """
+                )
+                render_rolling_volatility_chart(
+                    {"Portfolio": v_series},
+                    portfolio_order=["Portfolio"],
+                    color=PORTFOLIO_COLOR,
+                    explainer_md="""
+This shows the **rolling 12-month annualized volatility** for your portfolio. Higher values indicate periods where the portfolio experienced larger daily price swings.
+                    """
+                )

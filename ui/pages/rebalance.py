@@ -50,7 +50,7 @@ How to use: define your current weights and target weights (using the table, a b
         new_cash = st.number_input(
             "New cash to invest (EUR)",
             min_value=100.0,
-            value=5_000.0,
+            value=10_000.0,
             step=100.0,
             key="rebalance_new_cash",
         )

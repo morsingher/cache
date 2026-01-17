@@ -200,7 +200,7 @@ def render_example_json_ui(*, key_prefix: str, show_dropdown: bool = True) -> No
                 "Target": 40.0,
             },
         ]
-        minimal_example_obj = {"Name": "My Portfolio", "Assets": minimal_assets, "Value": 80_000.0}
+        minimal_example_obj = {"Name": "My Portfolio", "Assets": minimal_assets, "Value": 100_000.0}
 
         if not show_dropdown:
             txt = json.dumps(minimal_example_obj, indent=2)
@@ -309,7 +309,7 @@ def render_portfolio_builder(
     *,
     key: str,
     title: str = "Portfolio",
-    modes: list[str] = ["Manual", "Built-in JSON", "Upload JSON"],
+    modes: list[str] = ["Manual", "Built-in", "Upload"],
     allow_value: bool = False,
     default_mode: str = "Manual",
 ) -> Tuple[Optional[Portfolio], Optional[dict[str, Any]]]:
@@ -332,7 +332,7 @@ def render_portfolio_builder(
 
     built_json_obj: dict[str, Any] | None = None
 
-    if source == "Built-in JSON":
+    if source == "Built-in":
         portfolios_dir = os.path.join(CACHE_DIR, "portfolios")
         paths = []
         try:
@@ -347,7 +347,7 @@ def render_portfolio_builder(
             return None, None
 
         path = st.selectbox(
-            "Select a portfolio JSON",
+            "Select a built-in portfolio",
             options=paths,
             format_func=cached_portfolio_name,
             key=f"{key}_builtin",
@@ -361,7 +361,7 @@ def render_portfolio_builder(
             st.error(str(e))
             return None, None
 
-    if source == "Upload JSON":
+    if source == "Upload":
         render_example_json_ui(key_prefix=f"{key}_upload", show_dropdown=False)
 
         up = st.file_uploader("Upload a portfolio JSON", type=["json"], key=f"{key}_upload")
@@ -392,7 +392,7 @@ def render_portfolio_builder(
     with col2:
         value_eur = None
         if allow_value:
-            value_eur = st.number_input("Current value (EUR)", min_value=0.0, value=80_000.0, step=1_000.0, key=f"{key}_value")
+            value_eur = st.number_input("Current value (EUR)", min_value=0.0, value=100_000.0, step=1_000.0, key=f"{key}_value")
 
     asset_options, asset_mapping, asset_display_map = get_asset_options()
     if not asset_options:
@@ -418,8 +418,8 @@ def render_portfolio_builder(
         # Table-based UI
         default = pd.DataFrame(
             [
-                {"Asset": default_stocks, "Weight (%)": 60.0, "Target (%)": 60.0},
-                {"Asset": default_bonds, "Weight (%)": 40.0, "Target (%)": 40.0},
+                {"Asset": default_stocks, "Weight (%)": 65.0, "Target (%)": 60.0},
+                {"Asset": default_bonds, "Weight (%)": 35.0, "Target (%)": 40.0},
             ]
         )
         column_config = {
