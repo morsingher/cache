@@ -80,16 +80,10 @@ How to use: define your baseline portfolio by either manually creating it, selec
         # Get portfolio tickers to filter out already-included assets
         portfolio_tickers_set = set(getattr(p, "tickers", []))
         
-        # Build a unique key for this portfolio (source mode + tickers + name)
-        portfolio_source = st.session_state.get("whatif_source", "")
-        portfolio_name = getattr(p, "name", "")
-        portfolio_identity_key = (portfolio_source, portfolio_name, tuple(sorted(portfolio_tickers_set)))
-
-        # Filter candidates: only show assets not already in the portfolio
-        filtered_candidates = [
-            asset for asset in available_candidates
-            if asset.get("Ticker", "") not in portfolio_tickers_set
-        ]
+        # Filter candidates: we want to show ALL assets to the user, even if they are in the portfolio,
+        # so that if they switch portfolios and a selected asset becomes invalid (duplicate),
+        # it remains selected but shows an error, rather than disappearing silently.
+        filtered_candidates = available_candidates
 
         # Initialize variables
         candidate_short_to_ticker: dict[str, str] = {}  # Short name -> ticker
@@ -110,18 +104,17 @@ How to use: define your baseline portfolio by either manually creating it, selec
             # Sort options by FULL Name (case-insensitive)
             sorted_candidate_shorts = sorted(candidate_short_to_ticker.keys(), key=lambda s: str(candidate_short_to_name.get(s, s)).lower())
             
-            # Detect portfolio change (source, name, or tickers) and reset candidates if needed
-            prev_portfolio_key = st.session_state.get("whatif_portfolio_identity_key")
-            if prev_portfolio_key != portfolio_identity_key:
-                # Portfolio changed - clear old selection and pick new random defaults
-                st.session_state.pop("whatif_candidates", None)
-                st.session_state["whatif_portfolio_identity_key"] = portfolio_identity_key
-            
             # Initialize with 3 random candidates if no selection exists
             if "whatif_candidates" not in st.session_state:
-                num_defaults = min(3, len(sorted_candidate_shorts))
-                random_defaults = random.sample(sorted_candidate_shorts, num_defaults)
-                st.session_state["whatif_candidates"] = random_defaults
+                # Pick defaults that are NOT in the portfolio
+                valid_defaults = [
+                    short for short in sorted_candidate_shorts
+                    if candidate_short_to_ticker.get(short) not in portfolio_tickers_set
+                ]
+                num_defaults = min(3, len(valid_defaults))
+                if num_defaults > 0:
+                    random_defaults = random.sample(valid_defaults, num_defaults)
+                    st.session_state["whatif_candidates"] = random_defaults
             
             selected_candidate_shorts = st.multiselect(
                 "Candidate assets to evaluate",
@@ -130,6 +123,26 @@ How to use: define your baseline portfolio by either manually creating it, selec
                 key="whatif_candidates",
                 help="Select one or more assets to analyze for potential inclusion in your portfolio.",
             )
+
+            # Hard guard: selected candidates must not be in the portfolio.
+            selected_candidate_tickers = [
+                candidate_short_to_ticker[short]
+                for short in selected_candidate_shorts
+                if short in candidate_short_to_ticker
+            ]
+            duplicates = sorted(set(selected_candidate_tickers).intersection(portfolio_tickers_set))
+            invalid_selection = False
+            if duplicates:
+                dup_names = [
+                    candidate_short_to_display.get(short, short)
+                    for short, t in candidate_short_to_ticker.items()
+                    if t in duplicates
+                ]
+                st.error(
+                    "Selected candidates already exist in the portfolio. "
+                    f"Remove them from the selection: {', '.join(dup_names)}"
+                )
+                invalid_selection = True
             
             # Show warning if no candidates selected
             if not selected_candidate_shorts:
@@ -206,6 +219,9 @@ How to use: define your baseline portfolio by either manually creating it, selec
         run = st.button("Run what-if", type="primary", key="whatif_run")
 
         if run:
+            if invalid_selection:
+                st.error("Cannot run what-if analysis until duplicate candidates are removed.")
+                return
             with st.status("Running what-if analysis...", expanded=True) as status:
                 try:
                     total_start = time.time()

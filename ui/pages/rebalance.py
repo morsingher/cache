@@ -40,6 +40,12 @@ For example, you might want to avoid buying bonds during QE periods or you might
 In this case, only free tier models are available, so take the responses with a grain of salt. The goal is to help you reason about the trade-offs and make the best decision.
 
 How to use: define your current weights and target weights (using the table, a built-in portfolio or upload your own), input the new cash amount and optional preferences, then click "Run rebalancing".
+
+References for tactical allocation models:
+* Cliff Asness, Antti Ilmanen, Thomas Maloney - [**Market Timing: Sin a Little**](https://www.aqr.com/-/media/AQR/Documents/Insights/White-Papers/Market-Timing-Sin-a-Little.pdf)
+* Mebane T. Faber - [**A Quantitative Approach to Tactical Asset Allocation**](https://papers.ssrn.com/sol3/papers.cfm?abstract_id=962461)
+* Adam Butler, Mike Philbrick, Rodrigo Gordillo, David Varadi - [**Adaptive Asset Allocation: A Primer**](https://papers.ssrn.com/sol3/papers.cfm?abstract_id=2328254)
+* Diana Barro, Elio Canestrelli, Fabio Lanza - [**Volatility vs. Downside Risk: Optimally Protecting Against Drawdowns and Maintaining Portfolio Performance**](https://papers.ssrn.com/sol3/papers.cfm?abstract_id=2521007)
         """)
     
     # Portfolio builder in "Table Mode" (allow_value=True)
