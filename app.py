@@ -10,7 +10,7 @@ if CACHE_DIR not in sys.path:
 
 # --- Imports ---
 from ui.styles import apply_custom_css
-from ui.pages import home, analyze, compare, rebalance, whatif
+from ui.pages import home, analyze, compare, rebalance, withdraw, whatif
 from ui.assets import cached_price_date_ranges, load_available_assets, get_data_status
 
 # --- Configuration ---
@@ -39,14 +39,17 @@ if "go" in st.query_params:
     if go == "home":
         # Clear results when going home
         keys_to_clear = [
-            "analyze_results",
-            "compare_results",
-            "rebalance_results",
-            "whatif_results",
-            "rebalance_chat_history",
-            "rebalance_chat_started",
-            "whatif_chat_history",
-            "whatif_chat_started",
+                    "analyze_results",
+                    "compare_results",
+                    "rebalance_results",
+                    "withdraw_results",
+                    "whatif_results",
+                    "rebalance_chat_history",
+                    "rebalance_chat_started",
+                    "withdraw_chat_history",
+                    "withdraw_chat_started",
+                    "whatif_chat_history",
+                    "whatif_chat_started",
         ]
         for k in keys_to_clear:
             st.session_state.pop(k, None)
@@ -93,7 +96,8 @@ def render_navigation_back():
                 keys_to_clear = [
                     "analyze_results", 
                     "compare_results", 
-                    "rebalance_results", 
+                    "rebalance_results",
+                    "withdraw_results",
                     "whatif_results"
                 ]
                 for k in keys_to_clear:
@@ -116,6 +120,8 @@ elif page == "compare":
     compare.render()
 elif page == "rebalance":
     rebalance.render()
+elif page == "withdraw":
+    withdraw.render()
 elif page == "whatif":
     whatif.render()
 else:

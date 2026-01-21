@@ -982,6 +982,51 @@ class Portfolio:
         new_weights = new_amounts / (X + Y)
         return delta, new_amounts, new_weights
 
+    @staticmethod
+    def _allocate_withdrawal(current_value: float, withdraw_amount: float, wc: np.ndarray, wt: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """
+        Mathematically optimal withdrawal allocation (no buying):
+        project the desired sales onto the simplex {d >= 0, sum(d) = withdraw_amount}.
+        
+        This is the mirror of _allocate_new_cash():
+        - Current amounts: a = X * wc
+        - Target after withdrawal: (X - Y) * wt
+        - Ideal sales: b = a - (X - Y) * wt = X*wc - (X-Y)*wt
+        - Project b onto {d >= 0, sum(d) = Y} to get delta_sell
+        
+        Returns:
+            delta_sell: amount to sell per asset (sums to withdraw_amount)
+            new_amounts: remaining amounts after withdrawal
+            new_weights: resulting portfolio weights after withdrawal
+        """
+        X = float(current_value)
+        Y = float(withdraw_amount)
+        
+        if Y >= X:
+            raise ValueError(f"Withdrawal amount ({Y:.2f}) must be less than current value ({X:.2f})")
+        
+        a = X * wc  # current amounts
+        # Ideal: what we'd need to sell to reach target weights after withdrawal
+        b = a - (X - Y) * wt
+        
+        # Project onto simplex {d >= 0, sum(d) = Y}
+        u = b.copy()
+        u_sorted = np.sort(u)[::-1]
+        css = np.cumsum(u_sorted)
+        idx = np.nonzero(u_sorted - (css - Y) / (np.arange(1, u.size + 1)) > 0)[0]
+        if idx.size == 0:
+            theta = (css[0] - Y) / 1.0
+        else:
+            rho = int(idx[-1])
+            theta = (css[rho] - Y) / float(rho + 1)
+        delta_sell = np.maximum(0.0, b - theta)
+        if float(delta_sell.sum()) > 0:
+            delta_sell *= Y / float(delta_sell.sum())
+        
+        new_amounts = a - delta_sell
+        new_weights = new_amounts / (X - Y)
+        return delta_sell, new_amounts, new_weights
+
     def rebalance(self, new_cash: float) -> pd.DataFrame:
         """
         Compute the cash allocation across assets to move from current weights to target weights,
@@ -1012,7 +1057,61 @@ class Portfolio:
             {
                 "Current Weight (%)": np.asarray(wc) * 100.0,
                 "Target Weight (%)": np.asarray(wt) * 100.0,
-                "Cash (EUR)": delta,
+                "Buy (EUR)": delta,
+                "New Weight (%)": np.asarray(new_w) * 100.0,
+            },
+            index=labels,
+        )
+        out.index.name = None
+        return out
+
+    def withdraw(self, withdraw_amount: float) -> pd.DataFrame:
+        """
+        Compute the optimal sell allocation across assets to withdraw cash from the portfolio,
+        using a no-buying, simplex-projection allocation (optimal under a pure withdrawal objective).
+
+        This is the mirror of rebalance(): instead of adding cash with buys only, we remove cash
+        with sells only, while minimizing deviation from target weights.
+
+        Requires:
+          - self.current_value_eur (from JSON 'Value')
+          - self.actual_weights_pct, self.target_weights_pct (from JSON 'Weight'/'Target')
+
+        Returns:
+            DataFrame with columns:
+            - Current Weight (%): current portfolio weights
+            - Target Weight (%): target portfolio weights
+            - Sell (EUR): amount to sell per asset (sums to withdraw_amount)
+            - New Weight (%): resulting portfolio weights after withdrawal
+        """
+        if getattr(self, "current_value_eur", None) is None:
+            raise ValueError("Portfolio JSON is missing top-level 'Value' (current portfolio value in EUR).")
+        if withdraw_amount is None or float(withdraw_amount) <= 0:
+            raise ValueError("withdraw_amount must be > 0.")
+        if not hasattr(self, "actual_weights_pct") or not hasattr(self, "target_weights_pct"):
+            raise ValueError("Portfolio JSON must include per-asset 'Weight' and 'Target'.")
+
+        current_value = float(self.current_value_eur)
+        if float(withdraw_amount) >= current_value:
+            raise ValueError(
+                f"Withdrawal amount ({float(withdraw_amount):,.2f} EUR) must be less than "
+                f"current portfolio value ({current_value:,.2f} EUR)."
+            )
+
+        labels = [self._label(t) for t in self.tickers]
+        wc_pct = [float(self.actual_weights_pct[t]) for t in self.tickers]
+        wt_pct = [float(self.target_weights_pct[t]) for t in self.tickers]
+
+        wc = self._normalize_weights_to_fraction(wc_pct)
+        wt = self._normalize_weights_to_fraction(wt_pct)
+
+        delta_sell, _, new_w = self._allocate_withdrawal(current_value, float(withdraw_amount), wc=wc, wt=wt)
+
+        out = pd.DataFrame(
+            {
+                "Current Weight (%)": np.asarray(wc) * 100.0,
+                "Target Weight (%)": np.asarray(wt) * 100.0,
+                "Sell (EUR)": delta_sell,
                 "New Weight (%)": np.asarray(new_w) * 100.0,
             },
             index=labels,

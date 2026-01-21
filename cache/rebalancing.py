@@ -757,6 +757,51 @@ def build_llm_rebalance_report(
         "The user is based in Italy and the portfolio is in EUR, intended as a permanent, long-term investment."
     )
 
+    tactical_guidelines = """
+## Tactical Asset Allocation Guidelines
+
+When deciding whether to deviate from pure target-weight rebalancing, consider these tactical signals:
+
+### Valuation Signals (from diagnostics)
+- **Z-Score 12m**: Measures how far current price is from its 12-month mean in standard deviations.
+  - Z > +1.5: Asset is relatively **expensive** (price well above recent average) → consider underweighting
+  - Z < -1.5: Asset is relatively **cheap** (price well below recent average) → consider overweighting
+  - Z between -1.0 and +1.0: Near fair value relative to recent history
+
+- **EWMA Price Distance**: Shows momentum/trend direction.
+  - Positive values (e.g., >5%): Asset is in an **uptrend** (price above moving average)
+  - Negative values (e.g., <-5%): Asset is in a **downtrend** (price below moving average)
+
+### Tactical Decision Matrix
+Combine valuation and momentum for tactical tilts:
+- **Cheap + Uptrend** (Z < -1, EWMA dist > 0): Strong buy signal → overweight aggressively
+- **Cheap + Downtrend** (Z < -1, EWMA dist < 0): Value trap risk → buy cautiously, consider DCA
+- **Expensive + Uptrend** (Z > +1, EWMA dist > 0): Momentum still positive → hold, reduce new buys
+- **Expensive + Downtrend** (Z > +1, EWMA dist < 0): Strong sell signal → underweight or avoid
+
+### Macro Valuation Signals
+- **Stocks (Earnings Yield)**: Global earnings yield vs 10Y bond yield indicates equity attractiveness.
+  - Earnings yield > 10Y yield + 2%: Stocks are **attractively valued** (positive equity risk premium)
+  - Earnings yield < 10Y yield: Stocks are **expensive** relative to bonds (e.g., dot-com bubble had EY ~3% vs 10Y ~6%)
+  - Historical average equity risk premium is ~3-4%
+
+- **Bonds (Real Yield)**: Nominal yield minus inflation indicates bond attractiveness.
+  - Real yield > +1.5%: Bonds are **attractive** (positive real return after inflation)
+  - Real yield between 0% and +1%: Bonds are **neutral**
+  - Real yield < 0%: Bonds are **unattractive** (losing purchasing power, e.g., QE periods)
+
+### Historical Context
+- **Dot-com (2000)**: Earnings yield ~2.5% vs 10Y ~6% → stocks were extremely expensive
+- **GFC bottom (2009)**: Earnings yield ~7% vs 10Y ~3% → stocks were very cheap
+- **QE periods (2010-2021)**: Real yields often negative → bonds were unattractive for long-term investors
+
+### Important Caveats
+- These are **guidelines, not rules**. Markets can stay irrational longer than expected.
+- Small deviations (±5% from target) are reasonable; large deviations require strong conviction.
+- For long-term investors, staying invested usually beats tactical timing.
+- Transaction costs and taxes can erode tactical gains if trading too frequently.
+"""
+
     macro_lines: list[str] = []
     if macro_snapshot is None:
         macro_lines.append("Macro snapshot: unavailable (missing `FRED_API_KEY` or data fetch failed).")
@@ -850,6 +895,7 @@ def build_llm_rebalance_report(
     report: list[str] = []
     report.append("## System prompt\n\n")
     report.append(system_prompt + "\n\n")
+    report.append(tactical_guidelines + "\n\n")
     if user_preferences and str(user_preferences).strip():
         report.append("## User preferences\n\n")
         report.append("User preferences are optional, but should be used to guide the allocation decision. "
@@ -857,6 +903,18 @@ def build_llm_rebalance_report(
                       "Similarly, if the user wants to harvest a tax loss, then you are allowed to sell the assets the user indicates, even if rebalancing should be buy-only. "
                       "If the user does not specify any asset to use for harvesting, then suggest one but warn the user to check fiscal rules in their country. Here is what the user inserted:\n\n")
         report.append("```\n" + str(user_preferences).strip() + "\n```\n\n")
+    else:
+        report.append("## User preferences\n\n")
+        report.append("The user has not specified any preferences. Before providing your final recommendation, "
+                      "**ask the user** about the following:\n\n"
+                      "1. **Transaction costs**: Are there minimum order sizes, fixed fees per trade, or percentage-based commissions? "
+                      "Small allocations (e.g., <€100) may not be worth the fees.\n"
+                      "2. **Tax situation**: Does the user have any unrealized losses they could harvest by selling? "
+                      "Are there assets with large unrealized gains they want to avoid triggering?\n"
+                      "3. **Risk tolerance**: Is the user comfortable with tactical deviations from target weights, "
+                      "or do they prefer strict mechanical rebalancing?\n\n"
+                      "Provide your initial recommendation based on the tactical guidelines, but note these questions "
+                      "and explain how different answers might change the recommendation.\n\n")
     report.append("## Macro-economic snapshot\n\n")
     report.append("```\n" + "\n".join(macro_lines) + "\n```\n\n")
     report.append("## Portfolio diagnostics (assets as columns)\n\n")
@@ -883,12 +941,238 @@ def build_llm_rebalance_report(
     return "".join(report)
 
 
-def write_llm_report(text: str, portfolio_name: str) -> str:
+def build_llm_withdraw_report(
+    portfolio: Any,
+    withdraw_table: pd.DataFrame,
+    diagnostics_table: pd.DataFrame | None,
+    macro_snapshot: MacroSnapshot | None,
+    current_value: float,
+    withdraw_amount: float,
+    macro_trends: dict[str, dict[str, float | None]] | None = None,
+    user_preferences: str | None = None,
+) -> str:
+    """
+    Generate an LLM prompt for cash withdrawal, similar to build_llm_rebalance_report()
+    but with sell-only logic instead of buy-only.
+    
+    This is the mirror of build_llm_rebalance_report() for the withdrawal scenario.
+    """
+    portfolio_name = getattr(portfolio, "name", "Portfolio")
+
+    system_prompt = (
+        "You are a careful financial analyst and portfolio assistant. "
+        "Your job is to help the user decide how to withdraw cash from their portfolio. "
+        "Use the provided macro snapshot and portfolio diagnostics, but do not hallucinate data. "
+        "Ask clarifying questions if needed, and explicitly separate facts from assumptions. "
+        "Consider practical constraints (simplicity, diversification, risk tolerance, time horizon, "
+        "transaction costs/taxes, and liquidity). Provide a concrete recommended sell plan to raise the "
+        "requested cash amount, with brief reasoning and optional alternatives.\n\n"
+        "The user is based in Italy and the portfolio is in EUR, intended as a permanent, long-term investment."
+    )
+
+    tactical_guidelines = """
+## Tactical Asset Allocation Guidelines for Withdrawals
+
+When deciding which assets to sell (beyond pure target-weight rebalancing), consider these tactical signals:
+
+### Valuation Signals (from diagnostics)
+- **Z-Score 12m**: Measures how far current price is from its 12-month mean in standard deviations.
+  - Z > +1.5: Asset is relatively **expensive** → good candidate for selling
+  - Z < -1.5: Asset is relatively **cheap** → avoid selling if possible
+  - Z between -1.0 and +1.0: Near fair value relative to recent history
+
+- **EWMA Price Distance**: Shows momentum/trend direction.
+  - Positive values (e.g., >5%): Asset is in an **uptrend** → momentum still favorable
+  - Negative values (e.g., <-5%): Asset is in a **downtrend** → consider selling to cut losses
+
+### Tactical Decision Matrix for Selling
+Combine valuation and momentum to decide what to sell:
+- **Expensive + Downtrend** (Z > +1, EWMA dist < 0): Strong sell candidate → prioritize selling this
+- **Expensive + Uptrend** (Z > +1, EWMA dist > 0): Sell if needed, but momentum may continue
+- **Cheap + Downtrend** (Z < -1, EWMA dist < 0): Avoid selling (value trap but recovery possible)
+- **Cheap + Uptrend** (Z < -1, EWMA dist > 0): Avoid selling (best expected returns ahead)
+
+### Macro Valuation Signals
+- **Stocks (Earnings Yield)**: Global earnings yield vs 10Y bond yield indicates equity attractiveness.
+  - Earnings yield < 10Y yield: Stocks are **expensive** → selling stocks is reasonable
+  - Earnings yield > 10Y yield + 3%: Stocks are **cheap** → avoid selling stocks if possible
+
+- **Bonds (Real Yield)**: Nominal yield minus inflation indicates bond attractiveness.
+  - Real yield < 0%: Bonds are **unattractive** → selling bonds is reasonable
+  - Real yield > +1.5%: Bonds are **attractive** → avoid selling bonds if possible
+
+### Tax Efficiency Considerations
+When withdrawing, tax efficiency often matters more than tactical signals:
+- **Prefer selling assets with minimal gains**: Reduces capital gains tax burden
+- **Consider tax-loss harvesting**: If an asset is at a loss, selling it can offset gains elsewhere
+- **FIFO vs specific lot identification**: In some jurisdictions, you can choose which lots to sell
+- **Hold periods**: In Italy, there's no preferential rate for long-term gains (26% flat), but check current rules
+
+### Priority Order for Selling (general guidance)
+1. Assets at a loss (tax-loss harvesting opportunity)
+2. Assets with minimal gains (low tax impact)
+3. Overweight assets (rebalancing benefit)
+4. Expensive + downtrend assets (tactical signal)
+5. Last resort: cheap + uptrend assets (highest opportunity cost)
+
+### Important Caveats
+- Tax situation is individual—always verify with the user before assuming tax implications
+- Transaction costs matter: consolidate sells if possible to minimize fees
+- Keep enough in each asset to maintain diversification
+- For long-term investors, selling cheap assets locks in losses permanently
+"""
+
+    macro_lines: list[str] = []
+    if macro_snapshot is None:
+        macro_lines.append("Macro snapshot: unavailable (missing `FRED_API_KEY` or data fetch failed).")
+    else:
+        macro_lines.append(f"As-of: {macro_snapshot.asof.date().isoformat()}")
+        macro_lines.append("")
+        macro_lines.append("EU (levels):")
+        if macro_snapshot.ecb_dfr_pct is not None:
+            macro_lines.append(f"  ECB deposit rate: {macro_snapshot.ecb_dfr_pct:.2f}%")
+        if macro_snapshot.eu_10y_yield_pct is not None:
+            macro_lines.append(f"  EU 10Y yield: {macro_snapshot.eu_10y_yield_pct:.2f}%")
+        if macro_snapshot.eu_cpi_yoy_pct is not None:
+            macro_lines.append(f"  EU inflation YoY: {macro_snapshot.eu_cpi_yoy_pct:.2f}%")
+        if macro_snapshot.usd_eur_spot is not None:
+            macro_lines.append(f"  USD/EUR spot: {macro_snapshot.usd_eur_spot:.4f}")
+
+        macro_lines.append("")
+        macro_lines.append("US (levels):")
+        if macro_snapshot.fed_rf_pct is not None:
+            macro_lines.append(f"  Fed risk-free rate (EFFR): {macro_snapshot.fed_rf_pct:.2f}%")
+        if macro_snapshot.us_10y_yield_pct is not None:
+            macro_lines.append(f"  US 10Y yield: {macro_snapshot.us_10y_yield_pct:.2f}%")
+        if macro_snapshot.us_cpi_yoy_pct is not None:
+            macro_lines.append(f"  US inflation YoY: {macro_snapshot.us_cpi_yoy_pct:.2f}%")
+        if macro_snapshot.global_earnings_yield_est_pct is not None:
+            macro_lines.append(f"  Global earnings yield (est.): {macro_snapshot.global_earnings_yield_est_pct:.2f}%")
+            if getattr(macro_snapshot, "global_earnings_yield_note", None):
+                macro_lines.append(f"    Note: {macro_snapshot.global_earnings_yield_note}")
+
+        # Add historical trends if available
+        if macro_trends:
+            macro_lines.append("")  # blank line
+            macro_lines.append("Historical trends (3m / 6m / 12m ago):")
+
+            def _fmt_trend(key: str, *, label: str, fmt: str) -> None:
+                d = macro_trends.get(key)
+                if not isinstance(d, dict):
+                    return
+                vals: list[str] = []
+                for p in ["3m", "6m", "12m"]:
+                    v = d.get(p)
+                    if v is None:
+                        vals.append("N/A")
+                    else:
+                        vals.append(fmt.format(v))
+                macro_lines.append(f"  {label}: {vals[0]} / {vals[1]} / {vals[2]}")
+
+            _fmt_trend("ecb_dfr_pct", label="ECB deposit rate", fmt="{:.2f}%")
+            _fmt_trend("eu_10y_yield_pct", label="EU 10Y yield", fmt="{:.2f}%")
+            _fmt_trend("eu_cpi_yoy_pct", label="EU inflation YoY", fmt="{:.2f}%")
+            _fmt_trend("usd_eur", label="USD/EUR", fmt="{:.4f}")
+            _fmt_trend("fed_rf_pct", label="Fed risk-free (EFFR)", fmt="{:.2f}%")
+            _fmt_trend("us_10y_yield_pct", label="US 10Y yield", fmt="{:.2f}%")
+            _fmt_trend("us_cpi_yoy_pct", label="US inflation YoY", fmt="{:.2f}%")
+            _fmt_trend("global_ey_pct", label="Global earnings yield (est.)", fmt="{:.2f}%")
+
+    diagnostics_explain = (
+        "Diagnostics table notes:\n"
+        "- CAGR 12m: annualized growth rate over ~the last 12 months of prices.\n"
+        "- EWMA Price Dist 3m/6m/12m: (current price / EWMA price) - 1, using spans 63/126/252 trading days.\n"
+        "- EWMA Vol (ann): RiskMetrics EWMA volatility on daily log returns (lambda=0.94), annualized with sqrt(252).\n"
+        "- Z-Score 12m: (current price - mean) / std over the lookback price window.\n"
+        "- Corr vs Stocks 12m: correlation of monthly log returns vs the 'Stocks' benchmark.\n"
+    )
+
+    baseline_section = []
+    baseline_section.append("## Baseline (mathematically optimal) sell allocation\n\n")
+    baseline_section.append(
+        "The following allocation is the **baseline** suggestion produced by the app. "
+        "It is the *mathematically optimal* allocation of sales **under a pure withdrawal objective**: "
+        "use only non-negative sells (no buying) and distribute exactly the withdrawal amount such that the "
+        "resulting portfolio weights move as close as possible to the target weights (in a least-squares sense). "
+        "This is implemented via a projection onto the simplex (sum of sells equals withdrawal amount, sells are non-negative).\n\n"
+        "**However**, this baseline ignores forward-looking considerations (expected returns, valuations, regime/macro signals, "
+        "tax implications, and idiosyncratic opportunities). Use it as a reference point, and propose deviations only when "
+        "you can justify the trade-off.\n\n"
+        "**Tax consideration**: When possible, prefer selling assets with minimal or no capital gains to avoid triggering "
+        "unnecessary tax liabilities. If the user indicates specific lots with losses, those could be sold to offset gains elsewhere.\n\n"
+    )
+    baseline_section.append(
+        "The table below is CSV with a header row. The first column is the row label (Metric).\n\n"
+    )
+    baseline_section.append(_df_to_csv_block(withdraw_table.round(4).T, index_label="Metric"))
+
+    question = (
+        "Considering the macro snapshot and the portfolio diagnostics below, "
+        "how would you allocate the sales to withdraw cash from the user's portfolio?\n\n"
+        "Provide a recommended EUR sell amount per asset (summing exactly to the withdrawal amount), "
+        "and briefly justify the decision. If you would deviate from pure target-rebalancing, "
+        "explain why and what risks/assumptions drive the deviation.\n\n"
+    )
+
+    report: list[str] = []
+    report.append("## System prompt\n\n")
+    report.append(system_prompt + "\n\n")
+    report.append(tactical_guidelines + "\n\n")
+    if user_preferences and str(user_preferences).strip():
+        report.append("## User preferences\n\n")
+        report.append("User preferences are optional, but should be used to guide the sell decision. "
+                      "For example, if the user wants to minimize capital gains taxes, prioritize selling assets with minimal gains or even losses. "
+                      "If the user indicates specific assets with large unrealized gains to avoid, respect those constraints. "
+                      "If the user has tax losses to harvest, they can sell losing positions to offset gains elsewhere. Here is what the user inserted:\n\n")
+        report.append("```\n" + str(user_preferences).strip() + "\n```\n\n")
+    else:
+        report.append("## User preferences\n\n")
+        report.append("The user has not specified any preferences. Before providing your final recommendation, "
+                      "**ask the user** about the following critical tax and cost information:\n\n"
+                      "1. **Capital gains situation**: Which assets have unrealized gains? Which have losses? "
+                      "This is crucial for tax-efficient selling.\n"
+                      "2. **Tax-loss harvesting opportunity**: Are there assets at a loss that could be sold "
+                      "to offset gains from other sales or other income?\n"
+                      "3. **Transaction costs**: Are there minimum order sizes or fixed fees per trade? "
+                      "Should sells be consolidated to minimize costs?\n"
+                      "4. **Urgency**: Does the user need the cash immediately, or can they wait for "
+                      "better prices or tax timing (e.g., defer to next tax year)?\n\n"
+                      "Provide your initial recommendation based on the tactical guidelines and the "
+                      "assumption that minimizing taxes is important, but note these questions "
+                      "and explain how different answers might change the recommendation.\n\n")
+    report.append("## Macro-economic snapshot\n\n")
+    report.append("```\n" + "\n".join(macro_lines) + "\n```\n\n")
+    report.append("## Portfolio diagnostics (assets as columns)\n\n")
+    report.append(diagnostics_explain + "\n")
+    if diagnostics_table is None:
+        report.append("Diagnostics: unavailable.\n\n")
+    else:
+        report.append(
+            "The table below is CSV with a header row. "
+            "The first column is the row label (Metric).\n\n"
+        )
+        report.append(_df_to_csv_block(diagnostics_table.round(4).T, index_label="Metric"))
+    report.append("## Cash inputs\n\n")
+    report.append(
+        "```\n"
+        f"Portfolio name: {portfolio_name}\n"
+        f"Current portfolio value (EUR): {float(current_value):,.2f}\n"
+        f"Cash to withdraw (EUR): {float(withdraw_amount):,.2f}\n"
+        f"Remaining value after withdrawal (EUR): {float(current_value) - float(withdraw_amount):,.2f}\n"
+        "```\n\n"
+    )
+    report.append("".join(baseline_section))
+    report.append("## Question\n\n")
+    report.append(question + "\n")
+    return "".join(report)
+
+
+def write_llm_report(text: str, portfolio_name: str, report_type: str = "rebalance") -> str:
     reports_dir = os.path.join(os.path.dirname(__file__), "reports")
     reports_dir = os.path.abspath(reports_dir)
     os.makedirs(reports_dir, exist_ok=True)
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    fname = f"rebalance_prompt_{_safe_filename(portfolio_name)}_{ts}.md"
+    fname = f"{report_type}_prompt_{_safe_filename(portfolio_name)}_{ts}.md"
     out = os.path.join(reports_dir, fname)
     with open(out, "w", encoding="utf-8") as f:
         f.write(text)

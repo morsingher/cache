@@ -21,6 +21,9 @@ def render():
         if st.button("Rebalance with New Cash", type="primary", key="nav_rebalance", use_container_width=True):
             st.session_state["page"] = "rebalance"
             st.rerun()
+        if st.button("Withdraw Cash", type="primary", key="nav_withdraw", use_container_width=True):
+            st.session_state["page"] = "withdraw"
+            st.rerun()
         if st.button("What-if: Add an Asset", type="primary", key="nav_whatif", use_container_width=True):
             st.session_state["page"] = "whatif"
             st.rerun()
@@ -31,10 +34,11 @@ def render():
         st.markdown("""
 **What can this app do?**
 
-This app can help you manage your portfolio in 4 ways:
+This app can help you manage your portfolio in 5 ways:
 - Analyze its historical performance and understand correlations between assets.
 - Compare it against other benchmark portfolios.
 - Rebalance it with new cash, by considering deviations from target weights, macroeconomic conditions, trends, transaction costs and tax optimizations. An AI will assist you in the process.
+- Withdraw cash from it, by considering deviations from target weights, macroeconomic conditions, trends, transaction costs and tax optimizations. An AI will assist you in the process.
 - Explore what happens if you add new assets in terms of diversification and risk-adjusted returns. An AI will assist you in the process.
 
 **Who is this app intended for?**
