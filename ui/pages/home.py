@@ -61,4 +61,8 @@ In this case, only free tier models are available, so take the responses with a 
 **Why is it called CACH€?**
 
 The name is an intended pun on the word "cache", which is pronounced as "cash", but has a widespread use in computer science.
+
+**I found a bug / I have a feature request / I want to contribute**
+
+Please [open an issue](https://github.com/morsingher/cache/issues) on the GitHub repository or fill this [Google Form](https://forms.gle/ATuhP6zS3LgqMy9k9).
 """)
