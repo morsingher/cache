@@ -21,7 +21,7 @@ import os
 import sys
 import time
 import random
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 # Add cache directory to path for imports
@@ -712,7 +712,7 @@ def update_metadata(prices: pd.DataFrame, macro_available: bool) -> dict:
             }
     
     metadata = {
-        "updated_at": datetime.now().isoformat(),
+        "updated_at": datetime.now(timezone.utc).isoformat(),
         "tickers": list(prices.columns),
         "total_rows": len(prices),
         "date_range": {

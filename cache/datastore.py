@@ -6,7 +6,7 @@ local `data/` directory, which is populated by `scripts/update_data.py`.
 """
 import json
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
@@ -233,13 +233,27 @@ def get_data_freshness() -> str:
     
     try:
         update_time = datetime.fromisoformat(updated_at)
-        now = datetime.now()
+        now = datetime.now(timezone.utc)
+        
+        # Handle both timezone-aware (new format) and naive (old format) timestamps
+        if update_time.tzinfo is None:
+            # Old naive timestamp - assume it was meant to be UTC
+            update_time = update_time.replace(tzinfo=timezone.utc)
+        
         delta = now - update_time
+        total_seconds = delta.total_seconds()
+        
+        # Handle edge case where timestamp appears to be in the future
+        # (can happen due to clock drift)
+        if total_seconds < 0:
+            return "Updated just now"
         
         if delta.days == 0:
             hours = delta.seconds // 3600
             if hours == 0:
                 minutes = delta.seconds // 60
+                if minutes == 0:
+                    return "Updated just now"
                 return f"Updated {minutes} minute{'s' if minutes != 1 else ''} ago"
             return f"Updated {hours} hour{'s' if hours != 1 else ''} ago"
         elif delta.days == 1:
