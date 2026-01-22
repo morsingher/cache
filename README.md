@@ -1,4 +1,4 @@
-# CACH€ - Financial Portfolio Assistant
+# CACH€ - Your Financial Assistant
 
 A Streamlit application for portfolio analysis, comparison, rebalancing, withdrawal planning, and what-if scenarios. Built for long-term, passive EUR-denominated investors using ETFs.
 
