@@ -178,7 +178,7 @@ finance/
 
 ## Acknowledgements
 
-Built with [Streamlit](https://streamlit.io/), [Altair](https://altair-viz.github.io/), [yfinance](https://github.com/ranaroussi/yfinance), and [FRED](https://fred.stlouisfed.org/).
+Built with [Streamlit](https://streamlit.io/), [Altair](https://altair-viz.github.io/), [yfinance](https://github.com/ranaroussi/yfinance), and [FRED](https://fred.stlouisfed.org/). Kudos to my vibe-coding teammates Claude 4.5 Opus High, Gemini 3 Pro and GPT 5.2 Codex.
 
 ### References
 
