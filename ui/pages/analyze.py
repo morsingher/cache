@@ -2,7 +2,6 @@ import time
 import pandas as pd
 import streamlit as st
 import altair as alt
-import matplotlib.dates as mdates
 
 try:
     from portfolio import Portfolio
@@ -16,7 +15,7 @@ except ImportError:
     from portfolio import Portfolio
 
 from ui.portfolio_builder import render_portfolio_builder
-from ui.components import backtest_controls, timed_step
+from ui.components import backtest_controls, timed_step, fmt_days
 from ui.charts import (
     render_portfolio_value_chart, 
     render_drawdown_chart, 
@@ -24,15 +23,6 @@ from ui.charts import (
     render_rolling_volatility_chart
 )
 from ui.assets import get_short_name_map, get_data_status, load_available_assets
-
-def _fmt_days(x: float) -> str:
-    try:
-        v = float(x)
-    except Exception:
-        return "nan"
-    if pd.isna(v):
-        return "nan"
-    return f"{int(round(v))}d"
 
 def render():
     with st.expander("ℹ️ About this section", expanded=False):
@@ -209,7 +199,7 @@ is your only goal. CACH€ shines in AI-assisted portfolio rebalancing and what-
 
             col5, col6, col7, col8 = st.columns(4)
             col5.metric("Max Drawdown", f"{stats['max_drawdown']*100:.2f}%")
-            col6.metric("Longest Drawdown", _fmt_days(stats.get("longest_drawdown_days")))
+            col6.metric("Longest Drawdown", fmt_days(stats.get("longest_drawdown_days")))
             col7.metric("Ulcer Index", f"{stats['ulcer_index']:.2f}")
             col8.metric("Sortino Ratio", f"{stats['sortino']:.2f}")
 

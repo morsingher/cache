@@ -4,11 +4,31 @@ import random
 import os
 import streamlit as st
 import streamlit.components.v1 as components
+import pandas as pd
 
 try:
     from fredapi import Fred
 except ImportError:
     Fred = None
+
+
+def fmt_days(x: float) -> str:
+    """
+    Format a number of days as a human-readable string (e.g., "123d").
+    
+    Args:
+        x: Number of days (can be float or NaN).
+        
+    Returns:
+        Formatted string like "123d" or "nan" if invalid.
+    """
+    try:
+        v = float(x)
+    except Exception:
+        return "nan"
+    if pd.isna(v):
+        return "nan"
+    return f"{int(round(v))}d"
 
 # Imports for LLM
 try:
@@ -277,7 +297,7 @@ def render_llm_query_ui(
     if not chat_started:
         col1, col2 = st.columns([1, 1])
         with col1:
-            if st.button("Start Chat with LLM", type="primary", key=f"{key_prefix}_start_chat_btn"):
+            if st.button("Start Chat", type="primary", key=f"{key_prefix}_start_chat_btn"):
                 st.session_state[chat_history_key] = [
                     {"role": "user", "content": llm_prompt}
                 ]
@@ -285,7 +305,7 @@ def render_llm_query_ui(
                 st.session_state[chat_model_key] = selected_model
                 st.rerun()
         with col2:
-            st.caption("Click to send the analysis prompt and start an interactive conversation.")
+            st.caption("Click to start an interactive conversation with an AI assistant. Responses may take a few seconds.")
         return
     
     SYSTEM_MESSAGE = {

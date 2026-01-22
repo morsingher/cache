@@ -1,34 +1,36 @@
 {
-    "Name": "Permanent",
-    "Assets": [
-        {
-            "Name": "Stocks",
-            "Ticker": "ACWE.MI",
-            "Short": "Stocks",
-            "Weight": 27.0,
-            "Target": 25.0
-        },
-        {
-            "Name": "Cash",
-            "Ticker": "XEON.MI",
-            "Short": "Cash",
-            "Weight": 20.0,
-            "Target": 25.0
-        },
-        {
-            "Name": "Bonds EUR Long",
-            "Ticker": "EM15.MI",
-            "Short": "Bonds 15Y+",
-            "Weight": 26.0,
-            "Target": 25.0
-        },
-        {
-            "Name": "Gold",
-            "Ticker": "SGLD.MI",
-            "Short": "Gold",
-            "Weight": 27.0,
-            "Target": 25.0
-        }
-    ],
-    "Value": 100000.00
+  "Name": "Permanent",
+  "Description": "Harry Browne's Permanent Portfolio allocates 25% each to stocks, long-term bonds, gold, and cash. Designed for safety and simplicity, it aims to preserve wealth through any economic environment with minimal rebalancing required.",
+  "Link": "https://portfoliocharts.com/portfolio/permanent-portfolio/",
+  "Assets": [
+    {
+      "Name": "Stocks",
+      "Ticker": "ACWE.MI",
+      "Short": "Stocks",
+      "Weight": 27.0,
+      "Target": 25.0
+    },
+    {
+      "Name": "Cash",
+      "Ticker": "XEON.MI",
+      "Short": "Cash",
+      "Weight": 20.0,
+      "Target": 25.0
+    },
+    {
+      "Name": "Bonds EUR Long",
+      "Ticker": "EM15.MI",
+      "Short": "Bonds 15Y+",
+      "Weight": 26.0,
+      "Target": 25.0
+    },
+    {
+      "Name": "Gold",
+      "Ticker": "SGLD.MI",
+      "Short": "Gold",
+      "Weight": 27.0,
+      "Target": 25.0
+    }
+  ],
+  "Value": 100000.00
 }

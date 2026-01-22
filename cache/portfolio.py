@@ -547,10 +547,31 @@ class Portfolio:
         initial_value: float = 1.0,
     ) -> pd.Series:
         """
-        Rebalance-to-target backtest on a provided daily price panel.
-
-        Uses buy-and-hold between rebalances, and rebalances to fixed weights at
-        month/quarter/year-end.
+        Simulate portfolio value over time with periodic rebalancing to target weights.
+        
+        This implements a classic rebalancing backtest:
+        1. Start by buying shares of each asset according to target weights
+        2. Hold the portfolio (buy-and-hold) until the next rebalance date
+        3. At each rebalance date, sell/buy to restore target weights
+        4. Continue until the end of the price series
+        
+        The portfolio value at time t is: V(t) = sum_i(shares_i * price_i(t))
+        At rebalance: shares_i = (V * weight_i) / price_i
+        
+        Args:
+            prices: DataFrame with DatetimeIndex and asset columns (daily prices).
+            weights: Dict mapping ticker -> target weight (fractions summing to 1).
+            rebalance_frequency: One of "monthly", "quarterly", "annually".
+            initial_value: Starting portfolio value (default 1.0 for normalized series).
+            
+        Returns:
+            Series with DatetimeIndex and portfolio value at each date.
+            
+        Notes:
+            - Rebalancing occurs at month/quarter/year-end dates
+            - First day is never a rebalance day (initial allocation only)
+            - Assumes dividends are reinvested (use adjusted prices)
+            - Transaction costs are not modeled
         """
         if prices is None or prices.empty:
             return pd.Series(dtype=float, name="portfolio_value")
@@ -715,8 +736,31 @@ class Portfolio:
         trading_days_per_year: int = 252,
     ) -> dict[str, float]:
         """
-        Compute stats from a value series using DAILY LOG RETURNS for vol/Sharpe/Sortino,
-        plus total return, max drawdown, and max gain computed from the value series.
+        Compute comprehensive performance statistics from a portfolio value series.
+        
+        **Methodology:**
+        - Returns are computed as daily log returns: r_t = ln(V_t / V_{t-1})
+        - Volatility is annualized: σ_annual = σ_daily * √252
+        - Sharpe uses continuously-compounded RF: r_f,daily = ln(1 + RF_annual) / 252
+        - Sortino uses downside deviation below MAR (minimum acceptable return)
+        
+        **Formulas:**
+        - Total Return: (V_end / V_start) - 1
+        - CAGR: (V_end / V_start)^(1/years) - 1
+        - Volatility: std(r_daily) * √252
+        - Sharpe: mean(r_daily - r_f,daily) / std(r_daily) * √252
+        - Sortino: mean(r_daily - r_f,daily) * 252 / downside_dev_annual
+        - Downside Dev: √(mean(min(0, r_daily - MAR_daily)²)) * √252
+        
+        Args:
+            value: Series with DatetimeIndex and portfolio values.
+            rf_annual: Annual risk-free rate as decimal (e.g., 0.03 for 3%).
+            mar_annual: Minimum acceptable return for Sortino (defaults to rf_annual).
+            trading_days_per_year: Days used for annualization (default 252).
+            
+        Returns:
+            Dict with keys: total_return, cagr, vol_annual, sharpe, sortino,
+            max_drawdown, longest_drawdown_days, max_gain, ulcer_index.
         """
         if mar_annual is None:
             mar_annual = rf_annual
@@ -835,15 +879,40 @@ class Portfolio:
         w_a: float,
     ) -> float:
         """
-        Paper formula (Portfolio Intuition, Kennedy 2018):
-
-          RRR_pa = (w_p * r_p + w_a * r_a) / sqrt(w_p^2 * σ_p^2 + w_a^2 * σ_a^2 + 2*w_p*w_a*σ_p*σ_a*ρ)
-
-        Here we interpret:
-          r_p, r_a  as annualized mean returns (mu_p, mu_a)
-          σ_p, σ_a  as annualized volatilities (vol_p, vol_a)
-          ρ         as correlation of return series (same periodicity used to estimate vols)
-          w_a       as weight of the new asset post-allocation; w_p = 1 - w_a
+        Compute combined Return-to-Risk Ratio after adding an asset to a portfolio.
+        
+        Based on "Portfolio Intuition" (Kennedy, 2018) from Bridge Alternatives.
+        
+        **Formula:**
+        
+            RRR_pa = (w_p × μ_p + w_a × μ_a) / σ_pa
+        
+        where the combined volatility σ_pa is:
+        
+            σ_pa = √(w_p² × σ_p² + w_a² × σ_a² + 2 × w_p × w_a × σ_p × σ_a × ρ)
+        
+        **Key Insight:**
+        The "bare-minimum no-harm" condition for adding an asset (as w_a → 0) is:
+        
+            RRR_a > ρ × RRR_p
+        
+        If this holds, the asset can potentially improve risk-adjusted returns.
+        Lower correlation (ρ) makes it easier to pass this hurdle.
+        
+        Args:
+            mu_p: Annualized expected return of existing portfolio.
+            vol_p: Annualized volatility of existing portfolio.
+            mu_a: Annualized expected return of candidate asset.
+            vol_a: Annualized volatility of candidate asset.
+            rho: Correlation between portfolio and asset returns.
+            w_a: Weight allocated to new asset (0 < w_a < 1); w_p = 1 - w_a.
+            
+        Returns:
+            Combined portfolio RRR after adding the asset, or NaN if inputs invalid.
+            
+        References:
+            Kennedy (2018) "Portfolio Intuition" - Bridge Alternatives
+            https://www.bridgealternatives.com/insights/portfolio-intuition
         """
         w_a = float(w_a)
         if w_a <= 0 or w_a >= 1:
@@ -957,9 +1026,38 @@ class Portfolio:
     @staticmethod
     def _allocate_new_cash(current_value: float, new_cash: float, wc: np.ndarray, wt: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """
-        Mathematically optimal cash allocation (no selling):
-        project the desired changes onto the simplex {d >= 0, sum(d) = new_cash}.
-        Equivalent to dashboard.allocate_new_cash().
+        Compute optimal allocation of new cash to minimize deviation from target weights.
+        
+        This solves a constrained optimization problem using simplex projection:
+        
+        **Problem:**
+        - Current amounts: a = X * wc (where X = current_value)
+        - After adding cash Y, we want weights close to target: new_amounts / (X+Y) ≈ wt
+        - Constraint: can only BUY (no selling), so delta >= 0 and sum(delta) = Y
+        
+        **Solution:**
+        - Ideal buy amounts: b = (X + Y) * wt - a
+        - Project b onto simplex {d >= 0, sum(d) = Y} using Duchi et al. (2008) algorithm
+        
+        **Algorithm (Simplex Projection):**
+        1. Sort b in descending order
+        2. Find threshold θ such that max(0, b_i - θ) sums to Y
+        3. delta = max(0, b - θ)
+        
+        Args:
+            current_value: Current portfolio value (X).
+            new_cash: Amount of new cash to invest (Y).
+            wc: Current weights as fractions (numpy array, sums to 1).
+            wt: Target weights as fractions (numpy array, sums to 1).
+            
+        Returns:
+            Tuple of (delta, new_amounts, new_weights):
+            - delta: Amount to buy per asset (sums to new_cash)
+            - new_amounts: New EUR amount per asset after purchase
+            - new_weights: Resulting weights after purchase
+            
+        References:
+            Duchi et al. (2008) "Efficient Projections onto the l1-Ball"
         """
         X = float(current_value)
         Y = float(new_cash)
@@ -985,19 +1083,38 @@ class Portfolio:
     @staticmethod
     def _allocate_withdrawal(current_value: float, withdraw_amount: float, wc: np.ndarray, wt: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """
-        Mathematically optimal withdrawal allocation (no buying):
-        project the desired sales onto the simplex {d >= 0, sum(d) = withdraw_amount}.
+        Compute optimal sell allocation to withdraw cash while minimizing target deviation.
         
-        This is the mirror of _allocate_new_cash():
-        - Current amounts: a = X * wc
-        - Target after withdrawal: (X - Y) * wt
-        - Ideal sales: b = a - (X - Y) * wt = X*wc - (X-Y)*wt
-        - Project b onto {d >= 0, sum(d) = Y} to get delta_sell
+        Mirror of _allocate_new_cash(): instead of projecting buys, we project sells.
         
+        **Problem:**
+        - Current amounts: a = X * wc (where X = current_value)
+        - After withdrawing Y, we want weights close to target: remaining / (X-Y) ≈ wt
+        - Constraint: can only SELL (no buying), so delta_sell >= 0 and sum(delta_sell) = Y
+        
+        **Solution:**
+        - Ideal sell amounts: b = a - (X - Y) * wt = X*wc - (X-Y)*wt
+        - Project b onto simplex {d >= 0, sum(d) = Y}
+        
+        **Intuition:**
+        - Assets with b_i > 0 are overweight relative to post-withdrawal target → sell these
+        - Assets with b_i < 0 are underweight → avoid selling if possible
+        - The projection ensures we raise exactly Y while prioritizing overweight assets
+        
+        Args:
+            current_value: Current portfolio value (X).
+            withdraw_amount: Amount of cash to withdraw (Y, must be < X).
+            wc: Current weights as fractions (numpy array, sums to 1).
+            wt: Target weights as fractions (numpy array, sums to 1).
+            
         Returns:
-            delta_sell: amount to sell per asset (sums to withdraw_amount)
-            new_amounts: remaining amounts after withdrawal
-            new_weights: resulting portfolio weights after withdrawal
+            Tuple of (delta_sell, new_amounts, new_weights):
+            - delta_sell: Amount to sell per asset (sums to withdraw_amount)
+            - new_amounts: Remaining EUR amount per asset after sale
+            - new_weights: Resulting weights after withdrawal
+            
+        Raises:
+            ValueError: If withdraw_amount >= current_value.
         """
         X = float(current_value)
         Y = float(withdraw_amount)

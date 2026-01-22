@@ -37,22 +37,13 @@ from ui.assets import (
     load_available_assets,
     get_short_name_map,
 )
-from ui.components import timed_step, render_llm_query_ui, backtest_controls
+from ui.components import timed_step, render_llm_query_ui, backtest_controls, fmt_days
 from ui.charts import (
     render_portfolio_value_chart, 
     render_drawdown_chart,
     render_rolling_return_chart, 
     render_rolling_volatility_chart
 )
-
-def _fmt_days(x: float) -> str:
-    try:
-        v = float(x)
-    except Exception:
-        return "nan"
-    if pd.isna(v):
-        return "nan"
-    return f"{int(round(v))}d"
 
 def render():
     with st.expander("ℹ️ About this section", expanded=False):
@@ -611,7 +602,7 @@ All the credits to [Bridge Alternatives](https://www.bridgealternatives.com/insi
                 })
                 
                 if "longest_drawdown_days" in bt_df.columns:
-                    bt_df["Longest Drawdown"] = bt_df["longest_drawdown_days"].apply(lambda x: _fmt_days(x))
+                    bt_df["Longest Drawdown"] = bt_df["longest_drawdown_days"].apply(lambda x: fmt_days(x))
                     bt_df = bt_df.drop(columns=["longest_drawdown_days"])
 
                 st.dataframe(bt_df.T, width="stretch")

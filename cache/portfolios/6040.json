@@ -1,5 +1,7 @@
 {
   "Name": "60/40",
+  "Description": "The classic 60/40 portfolio allocates 60% to stocks and 40% to bonds. It has been the standard institutional benchmark for decades, offering a balance between growth and income while reducing volatility compared to all-equity portfolios.",
+  "Link": "https://portfoliocharts.com/portfolios/classic-60-40-portfolio/",
   "Assets": [
     {
       "Name": "Stocks",

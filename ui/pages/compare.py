@@ -27,7 +27,7 @@ from ui.portfolio_builder import (
     portfolio_from_json_obj_with_cache,
     render_portfolio_builder
 )
-from ui.components import backtest_controls, timed_step
+from ui.components import backtest_controls, timed_step, fmt_days
 from ui.assets import validate_portfolio_json_obj, get_short_name_map
 from ui.charts import (
     render_portfolio_value_chart, 
@@ -35,15 +35,6 @@ from ui.charts import (
     render_rolling_return_chart,
     render_rolling_volatility_chart
 )
-
-def _fmt_days(x: float) -> str:
-    try:
-        v = float(x)
-    except Exception:
-        return "nan"
-    if pd.isna(v):
-        return "nan"
-    return f"{int(round(v))}d"
 
 def render():
     with st.expander("ℹ️ About this section", expanded=False):
@@ -382,7 +373,7 @@ A dash (—) indicates the portfolio does not hold that asset.
                 df_display[c] = df_display[c].apply(lambda x: f"{x:.2f}" if pd.notna(x) else "—")
         
         if "Longest Drawdown" in df_display.columns:
-            df_display["Longest Drawdown"] = df_display["Longest Drawdown"].apply(lambda x: _fmt_days(x))
+            df_display["Longest Drawdown"] = df_display["Longest Drawdown"].apply(lambda x: fmt_days(x))
 
         # Transpose: metrics as rows, portfolios as columns
         st.dataframe(df_display.T, width="stretch")

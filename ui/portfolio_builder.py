@@ -43,6 +43,71 @@ except ImportError:
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CACHE_DIR = os.path.join(REPO_ROOT, "cache")
 
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def load_available_portfolios() -> list[dict[str, str]]:
+    """Load available built-in portfolios with their metadata."""
+    portfolios_dir = os.path.join(CACHE_DIR, "portfolios")
+    portfolios = []
+    try:
+        for fname in sorted(os.listdir(portfolios_dir)):
+            if fname.lower().endswith(".json"):
+                path = os.path.join(portfolios_dir, fname)
+                try:
+                    with open(path, "r", encoding="utf-8") as f:
+                        obj = json.load(f)
+                    portfolios.append({
+                        "Name": obj.get("Name", fname.replace(".json", "")),
+                        "Description": obj.get("Description", ""),
+                        "Link": obj.get("Link", ""),
+                        "Path": path,
+                    })
+                except Exception:
+                    portfolios.append({
+                        "Name": fname.replace(".json", ""),
+                        "Description": "",
+                        "Link": "",
+                        "Path": path,
+                    })
+    except Exception:
+        pass
+    return portfolios
+
+
+def render_portfolio_help_dropdown() -> None:
+    """Render a help dropdown explaining built-in portfolios."""
+    portfolios = load_available_portfolios()
+    if not portfolios:
+        return
+
+    # Only show if at least one portfolio has a description
+    if not any(p.get("Description") for p in portfolios):
+        return
+
+    with st.expander("💡 Need help choosing a portfolio?", expanded=False):
+        for portfolio in portfolios:
+            name = portfolio.get("Name", "")
+            description = portfolio.get("Description", "")
+            link = portfolio.get("Link", "")
+            
+            if not name:
+                continue
+            
+            # Skip portfolios without descriptions
+            if not description:
+                st.markdown(f"**{name}**: *No description available.*")
+                continue
+
+            if link:
+                name_link = f'<a href="{link}" target="_blank" style="color: #0066cc; text-decoration: underline;">{name}</a>'
+                st.markdown(
+                    f"**{name_link}**: {description}",
+                    unsafe_allow_html=True
+                )
+            else:
+                st.markdown(f"**{name}**: {description}")
+
+
 @st.cache_resource(ttl=3600, show_spinner="Loading portfolio (cached prices)...")
 def cached_load_portfolio(path: str) -> Portfolio:
     """
@@ -151,7 +216,12 @@ def _portfolio_json_from_manual(
                 "Target": target,
             }
         )
-    obj: dict[str, Any] = {"Name": str(portfolio_name).strip() or "Portfolio", "Assets": assets}
+    obj: dict[str, Any] = {
+        "Name": str(portfolio_name).strip() or "Portfolio",
+        "Description": "",
+        "Link": "",
+        "Assets": assets,
+    }
     obj["Value"] = round(float(value_eur), 2) if value_eur is not None else 100_000.0
     return obj
 
@@ -200,7 +270,13 @@ def render_example_json_ui(*, key_prefix: str, show_dropdown: bool = True) -> No
                 "Target": 40.0,
             },
         ]
-        minimal_example_obj = {"Name": "My Portfolio", "Assets": minimal_assets, "Value": 100_000.0}
+        minimal_example_obj = {
+            "Name": "My Portfolio",
+            "Description": "",
+            "Link": "",
+            "Assets": minimal_assets,
+            "Value": 100_000.0,
+        }
 
         if not show_dropdown:
             txt = json.dumps(minimal_example_obj, indent=2)
@@ -345,6 +421,8 @@ def render_portfolio_builder(
         if not paths:
             st.error("No built-in portfolios found in `cache/portfolios/`.")
             return None, None
+
+        render_portfolio_help_dropdown()
 
         path = st.selectbox(
             "Select a built-in portfolio",

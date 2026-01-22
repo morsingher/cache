@@ -1,48 +1,50 @@
 {
-    "Name": "Model",
-    "Assets": [
-        {
-            "Name": "Stocks",
-            "Ticker": "ACWE.MI",
-            "Short": "Stocks",
-            "Weight": 65.0,
-            "Target": 60.0
-        },
-        {
-            "Name": "Bonds",
-            "Ticker": "AGGH.MI",
-            "Short": "Bonds",
-            "Weight": 18.0,
-            "Target": 20.0
-        },
-        {
-            "Name": "Gold",
-            "Ticker": "SGLD.MI",
-            "Short": "Gold",
-            "Weight": 4.5,
-            "Target": 5.0
-        },
-        {
-            "Name": "Crypto BTC",
-            "Ticker": "BTC-EUR",
-            "Short": "BTC",
-            "Weight": 4.5,
-            "Target": 5.0
-        },
-        {
-            "Name": "Managed Futures",
-            "Ticker": "DBMF",
-            "Short": "Man. Futures",
-            "Weight": 4.0,
-            "Target": 5.0
-        },
-        {
-            "Name": "Commodity Carry",
-            "Ticker": "UEQC.DE",
-            "Short": "Comm. Carry",
-            "Weight": 4.0,
-            "Target": 5.0
-        }
-    ],
-    "Value": 100000.00
+  "Name": "Model",
+  "Description": "A highly diversified portfolio with alternative assets, broadly inspired by the Cockroach Approach from Mutiny Funds and the Model Portfolio from The Italian Leather Sofa.",
+  "Link": "https://theitalianleathersofa.com/model-portfolio/",
+  "Assets": [
+    {
+      "Name": "Stocks",
+      "Ticker": "ACWE.MI",
+      "Short": "Stocks",
+      "Weight": 65.0,
+      "Target": 60.0
+    },
+    {
+      "Name": "Bonds",
+      "Ticker": "AGGH.MI",
+      "Short": "Bonds",
+      "Weight": 18.0,
+      "Target": 20.0
+    },
+    {
+      "Name": "Gold",
+      "Ticker": "SGLD.MI",
+      "Short": "Gold",
+      "Weight": 4.5,
+      "Target": 5.0
+    },
+    {
+      "Name": "Crypto BTC",
+      "Ticker": "BTC-EUR",
+      "Short": "BTC",
+      "Weight": 4.5,
+      "Target": 5.0
+    },
+    {
+      "Name": "Managed Futures",
+      "Ticker": "DBMF",
+      "Short": "Man. Futures",
+      "Weight": 4.0,
+      "Target": 5.0
+    },
+    {
+      "Name": "Commodity Carry",
+      "Ticker": "UEQC.DE",
+      "Short": "Comm. Carry",
+      "Weight": 4.0,
+      "Target": 5.0
+    }
+  ],
+  "Value": 100000.00
 }

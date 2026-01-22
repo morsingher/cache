@@ -1,5 +1,4 @@
 keys.txt
-cache/TODO.txt
 *.pdf
 *.png
 .streamlit/secrets.toml

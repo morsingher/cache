@@ -1,41 +1,43 @@
 {
-    "Name": "All Weather",
-    "Assets": [
-        {
-            "Name": "Stocks",
-            "Ticker": "ACWE.MI",
-            "Short": "Stocks",
-            "Weight": 19.0,
-            "Target": 20.0
-        },
-        {
-            "Name": "Bonds EUR Short",
-            "Ticker": "EM13.MI",
-            "Short": "Bonds 1-3Y",
-            "Weight": 22.0,
-            "Target": 20.0
-        },
-        {
-            "Name": "Bonds EUR Long",
-            "Ticker": "EM15.MI",
-            "Short": "Bonds 15Y+",
-            "Weight": 17.0,
-            "Target": 20.0
-        },
-        {
-            "Name": "Gold",
-            "Ticker": "SGLD.MI",
-            "Short": "Gold",
-            "Weight": 18.0,
-            "Target": 20.0
-        },
-        {
-            "Name": "Stocks Small Cap",
-            "Ticker": "IUSN.DE",
-            "Short": "Small Cap",
-            "Weight": 24.0,
-            "Target": 20.0
-        }
-    ],
-    "Value": 100000.00
+  "Name": "All Weather",
+  "Description": "Ray Dalio's All Weather portfolio is designed to perform well across all economic environments (growth, recession, inflation, deflation). It uses risk parity principles to balance exposure to different economic scenarios through a mix of stocks, bonds, and commodities.",
+  "Link": "https://www.bridgewater.com/research-and-insights/the-all-weather-story",
+  "Assets": [
+    {
+      "Name": "Stocks",
+      "Ticker": "ACWE.MI",
+      "Short": "Stocks",
+      "Weight": 19.0,
+      "Target": 20.0
+    },
+    {
+      "Name": "Bonds EUR Short",
+      "Ticker": "EM13.MI",
+      "Short": "Bonds 1-3Y",
+      "Weight": 22.0,
+      "Target": 20.0
+    },
+    {
+      "Name": "Bonds EUR Long",
+      "Ticker": "EM15.MI",
+      "Short": "Bonds 15Y+",
+      "Weight": 17.0,
+      "Target": 20.0
+    },
+    {
+      "Name": "Gold",
+      "Ticker": "SGLD.MI",
+      "Short": "Gold",
+      "Weight": 18.0,
+      "Target": 20.0
+    },
+    {
+      "Name": "Stocks Small Cap",
+      "Ticker": "IUSN.DE",
+      "Short": "Small Cap",
+      "Weight": 24.0,
+      "Target": 20.0
+    }
+  ],
+  "Value": 100000.00
 }

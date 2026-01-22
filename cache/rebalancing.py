@@ -536,8 +536,28 @@ def print_macro_overview(fred_api_key: str | None = None, debug: bool = False) -
 
 def ewma_volatility_lambda(log_returns_series: pd.Series, lam: float = 0.94) -> float:
     """
-    RiskMetrics-style EWMA volatility (non-annualized, same periodicity as returns).
-    Uses: var_t = lam*var_{t-1} + (1-lam)*r_t^2
+    Compute RiskMetrics-style Exponentially Weighted Moving Average (EWMA) volatility.
+    
+    **Formula:**
+    Starting from sample variance, recursively update:
+    
+        σ²_t = λ × σ²_{t-1} + (1 - λ) × r_t²
+    
+    **Properties:**
+    - λ = 0.94 is the RiskMetrics daily decay factor (half-life ≈ 16 days)
+    - Higher λ → more weight on historical observations, smoother estimates
+    - Lower λ → more reactive to recent returns
+    
+    Args:
+        log_returns_series: Series of log returns (same frequency as desired vol).
+        lam: Decay factor (default 0.94 for daily data).
+        
+    Returns:
+        EWMA volatility (standard deviation), NOT annualized.
+        Returns NaN if insufficient data.
+        
+    References:
+        J.P. Morgan/Reuters (1996) "RiskMetrics Technical Document"
     """
     r = log_returns_series.dropna().to_numpy(dtype=float)
     if r.size < 2:
@@ -556,17 +576,48 @@ def compute_rebalancing_diagnostics(
     ewma_spans_trading_days: dict[str, int] | None = None,
 ) -> pd.DataFrame:
     """
-    Build a rebalancing diagnostics table using ~last year of data.
-
-    Includes:
-      - Correlation to Stocks over 3/6/12 months (daily log returns)
-      - EWMA price distance % over 3m/6m/12m (trading-day spans)
-      - EWMA volatility % (annualized)
-      - Z-score (12m) on prices
-
-    Expects portfolio to be cache.portfolio.Portfolio and to have:
-      - tickers, assets (ticker->asset_name), display_labels or _label()
-      - prices (downloaded yfinance Close, DataFrame/Series)
+    Build a diagnostics table to inform tactical rebalancing decisions.
+    
+    This table provides valuation and momentum signals for each asset:
+    
+    **Metrics Computed:**
+    
+    1. **CAGR (12m, %)** - Trailing 12-month compound annual growth rate
+       Computed from first/last price over the lookback period.
+    
+    2. **EWMA Price Distance % (3m/6m/12m)** - Momentum indicator
+       Shows how far current price is from its exponentially-weighted average:
+       
+           Distance = (Price - EWMA_price) / EWMA_price × 100
+       
+       Positive = price above average (momentum); negative = below average (potential value).
+    
+    3. **EWMA Volatility % (Annualized)** - Recent volatility using RiskMetrics decay
+       Uses λ=0.94 (daily), then annualized by √252.
+    
+    4. **Z-Score (12m, on prices)** - Mean-reversion signal
+       Measures how many standard deviations current price is from its 12m mean:
+       
+           Z = (Price - μ_12m) / σ_12m
+       
+       |Z| > 2 suggests potential overbought/oversold conditions.
+    
+    5. **Correlation to Stocks (12m, monthly)** - Diversification check
+       Rolling correlation using monthly returns for stability.
+    
+    Args:
+        portfolio: Portfolio object with tickers, assets, and prices.
+        lookback_days: Historical window for diagnostics (default 365 days).
+        trading_days_per_year: Days for annualization (default 252).
+        ewma_lambda: Decay factor for EWMA (default 0.94 per RiskMetrics).
+        ewma_spans_trading_days: Dict of span names to trading days
+            (default: {"3m": 63, "6m": 126, "12m": 252}).
+    
+    Returns:
+        DataFrame with assets as columns and diagnostic metrics as rows.
+        
+    Raises:
+        ValueError: If insufficient price data for meaningful diagnostics.
     """
     if ewma_spans_trading_days is None:
         ewma_spans_trading_days = {"3m": 63, "6m": 126, "12m": 252}

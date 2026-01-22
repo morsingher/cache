@@ -283,9 +283,52 @@ def diversification_scores(
     replace_weight: float = 0.05,
 ) -> pd.DataFrame:
     """
-    Ported from commodities.py: rank candidates by diversification vs existing portfolio assets.
-
-    Uses SIMPLE monthly returns because swap vol and drawdown are computed on an arithmetic portfolio series.
+    Rank candidate assets by their diversification potential vs an existing portfolio.
+    
+    This analysis helps answer: "Would adding this asset improve my portfolio's 
+    risk characteristics?"
+    
+    **Metrics Computed:**
+    
+    1. **Mean |Corr| to Assets** - Average absolute correlation with each portfolio asset
+       Lower = more independent from current holdings.
+    
+    2. **Max |Corr| to Assets** - Highest correlation with any single holding
+       Identifies potential redundancy.
+    
+    3. **Weighted Avg |Corr|** - Correlation weighted by portfolio weights
+       More relevant for concentrated portfolios.
+    
+    4. **Corr to Portfolio** - Correlation to overall portfolio returns
+       Lower = better portfolio-level diversification.
+    
+    5. **Δ Volatility (%)** - Projected change in portfolio volatility after swap
+       Computed as: vol(new_portfolio) - vol(baseline).
+       Negative = volatility reduction (good).
+    
+    6. **Δ |Max Drawdown| (%)** - Change in max drawdown magnitude
+       Computed as: |MDD_new| - |MDD_baseline|.
+       Negative = smaller worst-case losses (good).
+    
+    **Swap Mechanics:**
+    If replace_from is specified, the analysis swaps `replace_weight` fraction 
+    from that asset into the candidate, keeping total weights at 100%.
+    
+    Args:
+        candidate_rets: Monthly simple returns of candidate assets (columns).
+        portfolio_asset_rets: Monthly simple returns of portfolio assets (columns).
+        portfolio_weights: Dict of ticker -> weight fraction. If None, uses equal weights.
+        replace_from: Ticker to reduce allocation from (e.g., "ACWE.MI" for stocks).
+        replace_weight: Fraction of portfolio to swap (e.g., 0.05 for 5%).
+        
+    Returns:
+        DataFrame with candidates as index and diversification metrics as columns.
+        Sorted by weighted mean correlation (ascending = better diversifiers first).
+        
+    Notes:
+        - Uses simple (arithmetic) returns for portfolio construction accuracy
+        - Requires at least 6 months of overlapping data for correlation
+        - Δ metrics use same methodology as backtest to ensure consistency
     """
     if candidate_rets.empty or portfolio_asset_rets.empty:
         return pd.DataFrame()

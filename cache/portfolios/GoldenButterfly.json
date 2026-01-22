@@ -1,41 +1,43 @@
 {
-    "Name": "Golden Butterfly",
-    "Assets": [
-        {
-            "Name": "Stocks",
-            "Ticker": "ACWE.MI",
-            "Short": "Stocks",
-            "Weight": 28.0,
-            "Target": 30.0
-        },
-        {
-            "Name": "Bonds EUR Mid",
-            "Ticker": "EM710.MI",
-            "Short": "Bonds 7-10Y",
-            "Weight": 12.0,
-            "Target": 15.0
-        },
-        {
-            "Name": "Bonds EUR Long",
-            "Ticker": "EM15.MI",
-            "Short": "Bonds 15Y+",
-            "Weight": 42.0,
-            "Target": 40.0
-        },
-        {
-            "Name": "Gold",
-            "Ticker": "SGLD.MI",
-            "Short": "Gold",
-            "Weight": 6.0,
-            "Target": 7.5
-        },
-        {
-            "Name": "Commodity Beta",
-            "Ticker": "CMOD.MI",
-            "Short": "Comm. Beta",
-            "Weight": 12.0,
-            "Target": 7.5
-        }
-    ],
-    "Value": 100000.00
+  "Name": "Golden Butterfly",
+  "Description": "The Golden Butterfly is a variant of the Permanent Portfolio, adding small-cap value stocks. It splits assets into 20% each: stocks, small-cap value, long-term bonds, short-term bonds, and gold, aiming for better returns while maintaining stability across economic cycles.",
+  "Link": "https://portfoliocharts.com/portfolio/golden-butterfly/",
+  "Assets": [
+    {
+      "Name": "Stocks",
+      "Ticker": "ACWE.MI",
+      "Short": "Stocks",
+      "Weight": 28.0,
+      "Target": 30.0
+    },
+    {
+      "Name": "Bonds EUR Mid",
+      "Ticker": "EM710.MI",
+      "Short": "Bonds 7-10Y",
+      "Weight": 12.0,
+      "Target": 15.0
+    },
+    {
+      "Name": "Bonds EUR Long",
+      "Ticker": "EM15.MI",
+      "Short": "Bonds 15Y+",
+      "Weight": 42.0,
+      "Target": 40.0
+    },
+    {
+      "Name": "Gold",
+      "Ticker": "SGLD.MI",
+      "Short": "Gold",
+      "Weight": 6.0,
+      "Target": 7.5
+    },
+    {
+      "Name": "Commodity Beta",
+      "Ticker": "CMOD.MI",
+      "Short": "Comm. Beta",
+      "Weight": 12.0,
+      "Target": 7.5
+    }
+  ],
+  "Value": 100000.00
 }
