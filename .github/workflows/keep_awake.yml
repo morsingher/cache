@@ -1,0 +1,14 @@
+name: Ping Streamlit App
+
+on:
+  schedule:
+    # This runs every hour (adjust as needed)
+    - cron: '0 * * * *'
+  workflow_dispatch: # Allows you to run it manually for testing
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Send Request to App
+        run: curl -I https://cache-finance.streamlit.app
