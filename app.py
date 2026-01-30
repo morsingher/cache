@@ -1,5 +1,6 @@
 import os
 import sys
+import base64
 import streamlit as st
 
 # --- Setup Paths ---
@@ -10,7 +11,9 @@ if CACHE_DIR not in sys.path:
 
 # --- Imports ---
 from ui.styles import apply_custom_css
-from ui.pages import home, analyze, compare, rebalance, withdraw, whatif
+# REBRANDING: Commented out analyze and compare - keeping code for future use
+from ui.pages import home, rebalance, withdraw, whatif
+# from ui.pages import analyze, compare
 from ui.assets import cached_price_date_ranges, load_available_assets, get_data_status
 
 # --- Configuration ---
@@ -39,8 +42,9 @@ if "go" in st.query_params:
     if go == "home":
         # Clear results when going home
         keys_to_clear = [
-                    "analyze_results",
-                    "compare_results",
+                    # REBRANDING: Commented out analyze and compare - keeping code for future use
+                    # "analyze_results",
+                    # "compare_results",
                     "rebalance_results",
                     "withdraw_results",
                     "whatif_results",
@@ -57,20 +61,36 @@ if "go" in st.query_params:
     st.query_params.clear()
 
 def render_header():
-    # Center-aligned title with home link
+    # Load logo as base64
+    logo_path = os.path.join(REPO_ROOT, "logo.png")
+    with open(logo_path, "rb") as f:
+        logo_base64 = base64.b64encode(f.read()).decode()
+    
+    # Custom CSS for header styling
     st.markdown(
         """
+        <style>
+        .cache-logo {
+            width: 250px !important;
+            max-width: 250px !important;
+            height: auto !important;
+            margin-bottom: 0.5rem;
+        }
+        .cache-subtitle {
+            font-size: 1.8rem !important;
+            margin-top: 0 !important;
+            text-align: center;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+    # Center-aligned logo with home link
+    st.markdown(
+        f"""
         <div style="text-align: center;">
-            <a href="?go=home" target="_self" style="text-decoration: none; color: inherit;">
-                <h1 data-testid="stHeading" style="margin-bottom: 0;">
-                    CACH<span style="
-                        font-weight: 700; 
-                        display: inline-block; 
-                        transform: scaleX(1.3); 
-                        transform-origin: left;
-                        margin-right: 0.1em;
-                    ">€</span>
-                </h1>
+            <a href="?go=home" target="_self">
+                <img src="data:image/png;base64,{logo_base64}" class="cache-logo" style="width: 250px; max-width: 250px;" alt="CACH€">
             </a>
         </div>
         """,
@@ -78,7 +98,7 @@ def render_header():
     )
     # Center-aligned subtitle
     st.markdown(
-        '<div style="text-align: center;"><h3 style="margin-top: 0;">Your financial assistant. </h3></div>',
+        '<h3 class="cache-subtitle">Your Rebalancing Assistant</h3>',
         unsafe_allow_html=True,
     )
     # Only show warning if local data is not available (not freshness)
@@ -94,8 +114,9 @@ def render_navigation_back():
                 st.session_state["page"] = "home"
                 # Clear analysis results on back
                 keys_to_clear = [
-                    "analyze_results", 
-                    "compare_results", 
+                    # REBRANDING: Commented out analyze and compare - keeping code for future use
+                    # "analyze_results", 
+                    # "compare_results", 
                     "rebalance_results",
                     "withdraw_results",
                     "whatif_results"
@@ -114,10 +135,11 @@ page = st.session_state["page"]
 
 if page == "home":
     home.render()
-elif page == "analyze":
-    analyze.render()
-elif page == "compare":
-    compare.render()
+# REBRANDING: Commented out analyze and compare - keeping code for future use
+# elif page == "analyze":
+#     analyze.render()
+# elif page == "compare":
+#     compare.render()
 elif page == "rebalance":
     rebalance.render()
 elif page == "withdraw":

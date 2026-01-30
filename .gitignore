@@ -1,6 +1,6 @@
 keys.txt
 *.pdf
-*.png
+# *.png
 .streamlit/secrets.toml
 taa/
 

@@ -1,30 +1,40 @@
 import streamlit as st
 
 def render():
-    # Center ONLY this home question (other section headers should remain left-aligned).
-    st.markdown(
-        '<div style="text-align: center;"><h3 style="margin-top: 0;">Hi, what do you need today?</h3></div>',
-        unsafe_allow_html=True,
-    )
-    st.markdown("")  # Add spacing between question and buttons
+    # Apply larger styling for homepage elements only
+    st.markdown("""
+        <style>
+        /* Larger buttons on homepage only */
+        [data-testid="stVerticalBlock"] [data-testid="stButton"] button {
+            padding: 1rem 1.5rem !important;
+            min-height: 3.5rem !important;
+        }
+        [data-testid="stVerticalBlock"] [data-testid="stButton"] button p {
+            font-size: 1.3rem !important;
+            font-weight: 500 !important;
+        }
+        </style>
+    """, unsafe_allow_html=True)
+    
     # Reserve space on both sides so the navigation buttons stay centered under the title.
     left, mid, right = st.columns([2.2, 3.6, 2.2])
     left.empty()
     right.empty()
     with mid:
-        if st.button("Analyze a Portfolio", type="primary", key="nav_analyze", use_container_width=True):
-            st.session_state["page"] = "analyze"
-            st.rerun()
-        if st.button("Compare Portfolios", type="primary", key="nav_compare", use_container_width=True):
-            st.session_state["page"] = "compare"
-            st.rerun()
-        if st.button("Rebalance with New Cash", type="primary", key="nav_rebalance", use_container_width=True):
+        # REBRANDING: Commented out analyze and compare - keeping code for future use
+        # if st.button("Analyze a Portfolio", type="primary", key="nav_analyze", use_container_width=True):
+        #     st.session_state["page"] = "analyze"
+        #     st.rerun()
+        # if st.button("Compare Portfolios", type="primary", key="nav_compare", use_container_width=True):
+        #     st.session_state["page"] = "compare"
+        #     st.rerun()
+        if st.button("Deploy Cash", type="primary", key="nav_rebalance", use_container_width=True):
             st.session_state["page"] = "rebalance"
             st.rerun()
         if st.button("Withdraw Cash", type="primary", key="nav_withdraw", use_container_width=True):
             st.session_state["page"] = "withdraw"
             st.rerun()
-        if st.button("What-if: Add an Asset", type="primary", key="nav_whatif", use_container_width=True):
+        if st.button("Add a New Asset", type="primary", key="nav_whatif", use_container_width=True):
             st.session_state["page"] = "whatif"
             st.rerun()
     
@@ -34,12 +44,10 @@ def render():
         st.markdown("""
 **What can this app do?**
 
-This app can help you manage your portfolio in 5 ways:
-- Analyze its historical performance and understand correlations between assets.
-- Compare it against other benchmark portfolios.
-- Rebalance it with new cash, by considering deviations from target weights, macroeconomic conditions, trends, transaction costs and tax optimizations. An AI will assist you in the process.
+This app can help you manage your portfolio in 3 ways:
+- Deploy cash into it, by considering deviations from target weights, macroeconomic conditions, trends, transaction costs and tax optimizations. An AI will assist you in the process.
 - Withdraw cash from it, by considering deviations from target weights, macroeconomic conditions, trends, transaction costs and tax optimizations. An AI will assist you in the process.
-- Explore what happens if you add new assets in terms of diversification and risk-adjusted returns. An AI will assist you in the process.
+- Evaluate the impact of adding new assets in terms of diversification and risk-adjusted returns. An AI will assist you in the process.
 
 **Who is this app intended for?**
 

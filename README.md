@@ -1,6 +1,6 @@
-# CACH€ - Your Financial Assistant
+# CACH€ - Your Rebalancing Assistant
 
-A Streamlit application for portfolio analysis, comparison, rebalancing, withdrawal planning, and what-if scenarios. Built for long-term, passive EUR-denominated investors using ETFs.
+A Streamlit application for portfolio rebalancing, withdrawal planning, and what-if scenarios. Built for long-term, passive EUR-denominated investors using ETFs.
 
 ![Python](https://img.shields.io/badge/python-3.10+-blue.svg)
 ![Streamlit](https://img.shields.io/badge/streamlit-1.30+-red.svg)
@@ -8,23 +8,7 @@ A Streamlit application for portfolio analysis, comparison, rebalancing, withdra
 
 ## Features
 
-### 📊 Analyze a Portfolio
-Backtest a single portfolio over a selected date range with comprehensive metrics:
-- **Key Metrics**: Total return, CAGR, volatility, Sharpe/Sortino ratios, Ulcer Index, max drawdown, longest drawdown period
-- **Portfolio Value Chart**: Historical growth visualization with linear/logarithmic scale
-- **Asset Trajectories**: Individual performance of each asset in your portfolio
-- **Rolling 12M Correlation vs Stocks**: Understand diversification over time
-- **Drawdown Chart**: Visualize portfolio drawdowns and recovery periods
-- **Rolling Returns & Volatility**: 12-month rolling metrics
-
-### 📈 Compare Portfolios
-Compare multiple portfolios side-by-side:
-- Select from built-in portfolios, upload custom JSONs, or create manually
-- **Allocation Overview**: Visual comparison of asset allocations
-- **Key Metrics Table**: Side-by-side performance statistics
-- **Combined Charts**: Portfolio value, drawdown, rolling returns, and volatility
-
-### 💰 Rebalance with New Cash
+### 💰 Deploy Cash
 Compute optimal allocation of new funds to approach target weights **without selling** (tax-efficient):
 - **Optimal Buy Plan**: Exact EUR amounts to invest in each asset
 - **Portfolio Diagnostics**: Valuation metrics (Z-score, EWMA distance, 12m CAGR)
@@ -34,9 +18,9 @@ Compute optimal allocation of new funds to approach target weights **without sel
 ### 💸 Withdraw Cash
 Plan optimal withdrawals by **selling** assets while minimizing deviation from targets:
 - **Optimal Sell Plan**: Exact EUR amounts to sell per asset
-- **Same trend + macro diagnostics and AI assistance as rebalancing**
+- **Same trend + macro diagnostics and AI assistance as cash deployment**
 
-### 🔮 What-if: Add an Asset
+### 🔮 Add a New Asset
 Evaluate the impact of adding new assets to your portfolio:
 - **Diversification Analysis**: Correlations, volatility impact, weighted metrics
 - **RRR Analysis**: Return-to-Risk Ratio test based on [Portfolio Intuition (Kennedy 2018)](https://www.bridgealternatives.com/insights/portfolio-intuition)
@@ -142,7 +126,7 @@ Historical prices are from [Yahoo Finance](https://github.com/ranaroussi/yfinanc
 
 **Why individual stocks and bonds are not available? Why is my favorite ETF not available?**
 
-This app is built for long-term, passive investors, with the goal of helping them find their ideal asset allocation and optimally add/withdraw cash when needed. For this reason, the whole app is focused on assets rather than any specific implementation of them. For virtually any existing asset, I selected a reasonable ETF tracking such asset and the differences between specific ETFs should not matter for the intended user. Similarly, the intended user should not invest in individual securities. If you care about analyzing and comparing specific tickers, there are [much](https://backtes.to/) [better](https://testfol.io/) [alternatives](https://www.portfoliovisualizer.com/).
+This app is built for long-term, passive investors, with the goal of helping them optimally add/withdraw cash when needed. For this reason, the whole app is focused on assets rather than any specific implementation of them. For virtually any existing asset, I selected a reasonable ETF tracking such asset and the differences between specific ETFs should not matter for the intended user. Similarly, the intended user should not invest in individual securities.
 
 **How does the AI assistant work?**
 
@@ -159,10 +143,9 @@ finance/
 ├── app.py                 # Main Streamlit application
 ├── requirements.txt       # Python dependencies
 ├── cache/
-│   ├── portfolio.py       # Core Portfolio class with backtesting
+│   ├── portfolio.py       # Core Portfolio class
 │   ├── rebalancing.py     # Rebalancing logic and macro data
 │   ├── whatif.py          # What-if analysis functions
-│   ├── comparison.py      # CLI comparison utilities
 │   ├── datastore.py       # Local data store interface
 │   ├── openrouter.py      # LLM API integration
 │   ├── assets/            # Asset definitions and synthetic series
