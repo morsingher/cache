@@ -1,4 +1,4 @@
-name: Ping Streamlit App
+name: Wake Up Streamlit App
 
 on:
   schedule:
@@ -7,8 +7,20 @@ on:
   workflow_dispatch: # Allows you to run it manually for testing
 
 jobs:
-  ping:
+  wake_up:
     runs-on: ubuntu-latest
     steps:
-      - name: Send Request to App
-        run: curl -I https://cache-finance.streamlit.app
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+
+      - name: Install dependencies
+        run: |
+          pip install selenium
+
+      - name: Run Wake Up Script
+        run: python wake_up.py
